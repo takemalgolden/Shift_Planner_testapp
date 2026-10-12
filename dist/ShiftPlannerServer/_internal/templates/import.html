@@ -1,0 +1,11 @@
+{% extends "base.html" %}{% block content %}<h1>休暇・休み希望 CSV取込</h1>
+<div class="card"><p>Excelから「CSV UTF-8」で保存して取り込んでください。最初にCSVを読み込んで列を確認し、次に従業員名・日付・区分の列を対応付けます。</p>
+<form method="post" enctype="multipart/form-data"><label class="field">CSVファイル<input type="file" name="file" accept=".csv,text/csv" required></label><button>読み込み・プレビュー</button></form>
+{% if preview %}<h2>プレビュー（{{ preview.count }}件中 最大20件）</h2><table><tr>{% for h in preview.headers %}<th>{{ h }}</th>{% endfor %}</tr>{% for row in preview.rows %}<tr>{% for h in preview.headers %}<td>{{ row.get(h,"") }}</td>{% endfor %}</tr>{% endfor %}</table>{% endif %}
+{% if headers %}<h2>列の対応付け</h2><form method="post"><input type="hidden" name="import_action" value="apply">
+<div class="grid"><label class="field">従業員名の列<select name="name_col" required>{% for h in headers %}<option>{{ h }}</option>{% endfor %}</select></label>
+<label class="field">日付の列<select name="date_col" required>{% for h in headers %}<option>{{ h }}</option>{% endfor %}</select></label>
+<label class="field">休暇区分の列<select name="type_col" required><option value="">（列がない場合は通常の休み希望）</option>{% for h in headers %}<option>{{ h }}</option>{% endfor %}</select></label>
+<label class="field">状態の列<select name="status_col"><option value="">（未指定なら申請中）</option>{% for h in headers %}<option>{{ h }}</option>{% endfor %}</select></label></div><button>この対応付けで取込</button></form>{% endif %}
+{% if errors %}<h2>取込エラー</h2>{% for e in errors %}<div class="warning">{{ e }}</div>{% endfor %}{% endif %}
+</div>{% endblock %}

@@ -1,0 +1,40 @@
+{% extends "base.html" %}{% block content %}
+<h1>従業員管理</h1>
+<p class="muted">編集・無効化・再有効化ができます。無効化しても過去のシフトや希望休は削除されません。</p>
+<div class="card"><h2>従業員を追加</h2>
+<form method="post"><input type="hidden" name="action" value="add">
+<div class="grid">
+<label class="field">氏名<input name="name" required></label>
+<label class="field">月間勤務日数目安<input name="monthly_days" type="number" min="0" max="31" value="20" required></label>
+<label class="field">最小勤務時間<input name="min_hours" type="number" min="0" max="24" step=".5" value="4" required></label>
+<label class="field">最大勤務時間<input name="max_hours" type="number" min="0" max="24" step=".5" value="9" required></label>
+<label class="field">最大連勤日数<input name="max_consecutive" type="number" min="1" max="31" value="5" required></label>
+</div>
+<p>保有スキル: {% for skill in ["consumer","merchant","PP"] %}<label><input type="checkbox" name="skills" value="{{ skill }}" {% if skill=="consumer" %}checked{% endif %}>{{ skill }}</label> {% endfor %}</p>
+<p>勤務可能: {% for label in ["早番","中番","遅番"] %}<label><input type="checkbox" name="allowed" value="{{ label }}" checked>{{ label }}</label> {% endfor %}</p>
+<button type="submit">登録</button></form></div>
+<div class="card"><h2>登録済み従業員</h2>
+<div style="overflow-x:auto"><table><thead><tr><th>氏名</th><th>スキル</th><th>勤務条件</th><th>状態・連携</th><th>操作</th></tr></thead><tbody>
+{% for e in employees %}
+<tr><td>{{ e.name }}</td><td>{{ e.skills }}</td><td>月{{ e.monthly_days }}日 / {{ e.min_hours }}〜{{ e.max_hours }}時間 / 最大{{ e.max_consecutive }}連勤</td>
+<td>{{ "有効" if e.active else "無効" }}{% if e.source_user_id is not none %}<div class="small muted">休憩アプリ連携</div>{% endif %}</td>
+<td><details><summary style="cursor:pointer">編集</summary>
+<form method="post" style="min-width:230px;margin-top:10px">
+<input type="hidden" name="action" value="edit"><input type="hidden" name="employee_id" value="{{ e.id }}">
+<label class="field">氏名<input name="name" value="{{ e.name }}" required></label>
+<label class="field">月間勤務日数<input name="monthly_days" type="number" min="0" max="31" value="{{ e.monthly_days }}" required></label>
+<label class="field">最小勤務時間<input name="min_hours" type="number" min="0" max="24" step=".5" value="{{ e.min_hours }}" required></label>
+<label class="field">最大勤務時間<input name="max_hours" type="number" min="0" max="24" step=".5" value="{{ e.max_hours }}" required></label>
+<label class="field">最大連勤日数<input name="max_consecutive" type="number" min="1" max="31" value="{{ e.max_consecutive }}" required></label>
+<div>スキル:<br>{% for skill in ["consumer","merchant","PP"] %}<label><input type="checkbox" name="skills" value="{{ skill }}" {% if skill in e.skills.split(",") %}checked{% endif %}>{{ skill }}</label> {% endfor %}</div>
+<div>勤務可能:<br>{% for label,field in [("早番","early_ok"),("中番","mid_ok"),("遅番","late_ok")] %}<label><input type="checkbox" name="allowed" value="{{ label }}" {% if e[field] %}checked{% endif %}>{{ label }}</label> {% endfor %}</div>
+<button type="submit">変更を保存</button></form></details>
+<form method="post" style="margin-top:8px" onsubmit="return confirm('{{ '有効化' if not e.active else '無効化' }}しますか？')">
+<input type="hidden" name="employee_id" value="{{ e.id }}">
+{% if e.active %}<input type="hidden" name="action" value="delete"><button class="danger" type="submit">無効化</button>
+{% else %}<input type="hidden" name="action" value="restore"><button type="submit">再有効化</button>{% endif %}
+</form></td></tr>
+{% endfor %}
+</tbody></table></div>
+<p class="small muted">「削除」は安全のため無効化として実装しています。休憩アプリから同期した従業員の氏名・スキル・在籍状態は、次回の同期で連携元の値に戻ります。</p>
+</div>{% endblock %}

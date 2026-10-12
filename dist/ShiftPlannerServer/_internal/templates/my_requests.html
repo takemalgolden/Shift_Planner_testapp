@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block content %}
+<h1>希望休の提出</h1>
+<div class="card"><p>{{ employee_name }} さんの希望休を提出できます。提出した希望は管理者が確認します。</p>
+<form method="post"><div class="grid">
+<label class="field">希望日<input type="date" name="request_date" required></label>
+<label class="field">希望区分<select name="request_type"><option>通常の休み希望</option><option>できれば休み</option><option>有給休暇</option><option>確定休</option></select></label>
+<label class="field">備考（任意）<input name="note" maxlength="500" placeholder="理由や補足があれば入力"></label>
+</div><button>希望休を提出</button></form></div>
+<div class="card"><h2>自分の提出履歴</h2><table><tr><th>希望日</th><th>区分</th><th>状態</th><th>備考</th></tr>{% for r in rows %}<tr><td>{{ r.request_date }}</td><td>{{ r.request_type }}</td><td>{{ {"pending":"申請中","approved":"承認済み","rejected":"却下"}.get(r.status,r.status) }}</td><td>{{ r.note }}</td></tr>{% else %}<tr><td colspan="4">まだ提出履歴はありません。</td></tr>{% endfor %}</table></div>
+{% endblock %}

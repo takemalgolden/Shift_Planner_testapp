@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% block content %}
+<h1>休憩時間配置アプリとの従業員データ連携</h1>
+<div class="warning"><strong>連携前に確認：</strong>休憩時間配置アプリとシフト作成アプリは別々のSQLiteデータベースを使用します。この画面は休憩時間配置アプリのDBを読み取り専用で参照し、従業員情報をシフト作成側へ同期します。元アプリのデータは変更しません。</div>
+<div class="card"><h2>データベースの場所</h2>
+<form method="post"><label class="field">休憩時間配置アプリのDBファイル（callcenter.sqlite3）<input style="width:100%" name="db_path" value="{{ db_path }}" required></label><p class="muted">ソース版の標準配置は ../callcenter_local_app/data/callcenter.sqlite3 です。休憩時間配置アプリをEXEで実行している場合は通常 %LOCALAPPDATA%\\CallCenterLocal\\data\\callcenter.sqlite3 にあります。管理者PC上の実際のパスを指定してください。</p><button name="action" value="save_path">参照先を保存</button> <button name="action" value="sync">従業員を同期</button></form>
+{% if preview_count is not none %}<p>現在参照できる有効なオペレーターアカウント：<strong>{{ preview_count }}名</strong></p>{% else %}<p class="muted">指定されたDBを読み取れません。パスが正しいか確認してください。</p>{% endif %}
+</div>
+<div class="card"><h2>同期される項目</h2><ul><li>従業員IDとの紐付け（元アプリのユーザーID）</li><li>氏名、在籍状態、スキル</li><li>ログインID</li></ul><p>同期後、オペレーターは休憩時間配置アプリと同じログインID・パスワードで希望休提出画面に入れます。パスワード認証は元アプリのDBを読み取り専用で確認します。管理者アカウントは自動で取り込みません。</p><p class="muted">重要：元アプリで従業員を追加・無効化した後は、この画面で再同期してください。スキル表記は Consumer → consumer、Merchant → merchant、PP → PP に変換します。</p></div>
+{% endblock %}

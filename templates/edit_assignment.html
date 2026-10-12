@@ -1,0 +1,5 @@
+{% extends "base.html" %}{% block content %}<h1>シフト編集</h1><div class="card"><form method="post">
+<label class="field">従業員<select name="employee_id">{% for e in employees %}<option value="{{ e.id }}" {% if e.id==a.employee_id %}selected{% endif %}>{{ e.name }}</option>{% endfor %}</select></label>
+<label class="field">勤務パターン<select name="pattern_id">{% for p in patterns %}<option value="{{ p.id }}" {% if p.id==a.pattern_id %}selected{% endif %}>{{ p.name }} ({{ p.start_time }}–{{ p.end_time }})</option>{% endfor %}</select></label>
+<label class="field">担当スキル<select name="skill">{% for s in ["merchant","consumer","PP"] %}<option {% if s==a.skill %}selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+<label class="field">備考<input name="note" value="{{ a.note }}"></label><button>保存</button></form></div>{% endblock %}

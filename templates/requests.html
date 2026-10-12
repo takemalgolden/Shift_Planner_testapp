@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block content %}
+<h1>希望休管理</h1>
+<div class="card"><h2>管理者による登録</h2><form method="post"><input type="hidden" name="action" value="add"><div class="grid">
+<label class="field">従業員<select name="employee_id" required>{% for e in employees %}<option value="{{ e.id }}">{{ e.name }}</option>{% endfor %}</select></label>
+<label class="field">日付<input type="date" name="request_date" required></label>
+<label class="field">区分<select name="request_type">{% for t in ["有給休暇","確定休","通常の休み希望","できれば休み","申請中"] %}<option>{{ t }}</option>{% endfor %}</select></label>
+<label class="field">状態<select name="status"><option value="pending">申請中・未承認</option><option value="approved">承認済み</option><option value="rejected">却下</option></select></label>
+<label class="field">備考<input name="note"></label></div><button>登録</button></form></div>
+<div class="card"><h2>提出一覧・審査</h2><p class="muted">承認済みの希望休はシフト作成時の参考情報になります。希望休の承認だけで勤務割当が自動確定するわけではありません。</p>
+<table><tr><th>日付</th><th>従業員</th><th>区分</th><th>状態</th><th>備考</th><th>審査操作</th></tr>{% for r in rows %}<tr><td>{{ r.request_date }}</td><td>{{ r.name }}</td><td>{{ r.request_type }}</td><td>{{ {"pending":"申請中","approved":"承認済み","rejected":"却下"}.get(r.status,r.status) }}</td><td>{{ r.note }}</td><td><form method="post"><input type="hidden" name="action" value="status"><input type="hidden" name="request_id" value="{{ r.id }}"><select name="status"><option value="pending" {% if r.status=="pending" %}selected{% endif %}>申請中</option><option value="approved" {% if r.status=="approved" %}selected{% endif %}>承認</option><option value="rejected" {% if r.status=="rejected" %}selected{% endif %}>却下</option></select> <button>更新</button></form></td></tr>{% endfor %}</table></div>{% endblock %}

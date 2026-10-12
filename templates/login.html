@@ -1,0 +1,7 @@
+{% extends "base.html" %}{% block content %}
+<div class="card" style="max-width:420px;margin:60px auto"><h1>ログイン</h1>
+<form method="post"><label class="field">ユーザーID<input name="username" required autocomplete="username"></label>
+<label class="field">パスワード<input name="password" type="password" required autocomplete="current-password"></label>
+<button type="submit">ログイン</button></form>
+<p class="muted small">初期管理者アカウントはREADME.mdを参照してください。初期パスワードは必ず変更してください。</p></div>
+{% endblock %}

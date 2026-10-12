@@ -1,0 +1,7 @@
+{% extends "base.html" %}{% block content %}<h1>シフト最終確定（二段階目）</h1><p>対象月: {{ month }}</p>
+<div class="card"><p>警告を再確認してください。警告が残る場合、理由を記録して確定できます。確定済み休暇との重複は修正が必要です。</p>
+{% if first %}<p>1段階目確認済み: {{ first.created_at }} / {{ first.admin_username }}</p>{% else %}<div class="warning">1段階目の確認記録がありません。先に警告画面で「警告を確認した」を実行してください。</div>{% endif %}
+{% for w in warnings %}<div class="warning"><strong>{{ w.date }} — {{ w.kind }}</strong><br>{{ w.detail }}</div>{% endfor %}
+<form method="post" action="{{ url_for('finalize') }}"><input type="hidden" name="month" value="{{ month }}"><input type="hidden" name="stage" value="final">
+<label class="field">最終確定の理由・警告を許容する理由<textarea name="reason" rows="3" required placeholder="例: 欠員対応のため。管理者確認済み。"></textarea></label>
+<button {% if not first %}disabled{% endif %} onclick="return confirm('警告と理由を確認しましたか？この操作で月間シフトを確定します。')">2段階目：最終確定</button></form></div>{% endblock %}

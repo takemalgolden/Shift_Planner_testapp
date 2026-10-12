@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>必要人数設定</h1>
+<p class="muted">曜日・時間帯・スキルごとに最低配置人数を設定します。日付個別ルールや月別コピーは未実装です。</p>
+<div class="card">
+  <h2>ルール追加</h2>
+  <form method="post">
+    <input type="hidden" name="action" value="add">
+    <div class="grid">
+      <label class="field">曜日<select name="weekday">{% for w in weekdays %}<option value="{{ loop.index0 }}">{{ w }}</option>{% endfor %}</select></label>
+      <label class="field">開始<input type="time" name="start_time" value="09:20" required></label>
+      <label class="field">終了<input type="time" name="end_time" value="23:00" required></label>
+      <label class="field">スキル<select name="skill">{% for s in ["merchant","consumer","PP"] %}<option>{{ s }}</option>{% endfor %}</select></label>
+      <label class="field">必要人数<input type="number" name="min_count" min="0" max="100" value="1" required></label>
+    </div><button>追加</button>
+  </form>
+</div>
+<div class="card">
+  <h2>登録済みルールの編集・削除</h2>
+  <table>
+    <tr><th>曜日</th><th>開始</th><th>終了</th><th>スキル</th><th>必要人数</th><th>操作</th></tr>
+    {% for r in rows %}
+    <tr>
+      <td>
+        <form id="coverage-update-{{ r.id }}" method="post">
+          <input type="hidden" name="action" value="update">
+          <input type="hidden" name="coverage_id" value="{{ r.id }}">
+        </form>
+        <select name="weekday" form="coverage-update-{{ r.id }}">{% for w in weekdays %}<option value="{{ loop.index0 }}" {% if r.weekday == loop.index0 %}selected{% endif %}>{{ w }}</option>{% endfor %}</select>
+      </td>
+      <td><input type="time" name="start_time" value="{{ r.start_time }}" required form="coverage-update-{{ r.id }}"></td>
+      <td><input type="time" name="end_time" value="{{ r.end_time }}" required form="coverage-update-{{ r.id }}"></td>
+      <td><select name="skill" form="coverage-update-{{ r.id }}">{% for s in ["merchant","consumer","PP"] %}<option {% if r.skill == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select></td>
+      <td><input type="number" name="min_count" min="0" max="100" value="{{ r.min_count }}" required form="coverage-update-{{ r.id }}"></td>
+      <td><button type="submit" form="coverage-update-{{ r.id }}">保存</button>
+        <form method="post" style="display:inline" onsubmit="return confirm('この必要人数ルールを削除しますか？')">
+          <input type="hidden" name="action" value="delete"><input type="hidden" name="coverage_id" value="{{ r.id }}"><button class="danger">削除</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

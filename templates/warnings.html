@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block content %}<h1>警告・必要人数チェック</h1><p>対象月: {{ month }}</p>
+{% if warnings %}<p><strong>{{ warnings|length }}件の警告があります。</strong></p>{% for w in warnings %}<div class="warning"><strong>{{ w.date }} — {{ w.kind }}</strong><br>{{ w.detail }}</div>{% endfor %}
+{% else %}<div class="card">現在、チェック対象の警告はありません。</div>{% endif %}
+<div class="card"><h2>二段階確認</h2><p>同一管理者が、まず警告を確認し、再確認後に理由を入力して確定します。確定済み休暇との重複は確定できません。</p>
+<form method="post" action="{{ url_for('finalize') }}"><input type="hidden" name="month" value="{{ month }}"><input type="hidden" name="stage" value="review"><button>1段階目：警告を確認した</button></form>
+<p><a class="btn" href="{{ url_for('finalize_page',month=month) }}">2段階目へ進む</a></p></div>{% endblock %}

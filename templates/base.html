@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title or "月間シフト管理" }}</title>
+<style>
+:root{font-family:"Yu Gothic UI",Meiryo,sans-serif;color:#222;background:#f4f6f8}
+body{margin:0}header{background:#20354b;color:#fff;padding:14px 22px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+header a{color:#fff;text-decoration:none;margin-right:12px}main{max-width:1300px;margin:22px auto;padding:0 16px}
+nav{display:flex;gap:12px;flex-wrap:wrap}h1{font-size:24px}h2{font-size:19px;margin-top:26px}
+.card{background:white;border:1px solid #dce2e8;border-radius:10px;padding:16px;margin:14px 0;box-shadow:0 1px 2px #00000008}
+input,select,textarea{padding:8px;border:1px solid #bbc5d0;border-radius:5px;max-width:100%;box-sizing:border-box}
+button,.btn{background:#245b8f;color:white;border:0;border-radius:5px;padding:9px 13px;cursor:pointer;text-decoration:none;display:inline-block}
+button.danger{background:#a33636}.muted{color:#65717e}.flash{padding:10px 12px;border-radius:6px;background:#e7f3ff;margin:8px 0}.flash.error{background:#ffe8e8}
+table{border-collapse:collapse;width:100%;background:white}th,td{border:1px solid #dce2e8;padding:8px;text-align:left;vertical-align:top}th{background:#edf1f5}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.field{display:flex;flex-direction:column;gap:5px;margin:6px 0}
+.small{font-size:13px}.pill{background:#eaf0f5;border-radius:20px;padding:3px 8px;font-size:12px}.warning{background:#fff4d8;border-left:4px solid #d28c00;padding:12px;margin:10px 0}
+.calendar{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:5px}.day{background:#fff;border:1px solid #dce2e8;border-radius:6px;min-height:140px;padding:7px;overflow-wrap:anywhere}.dayhead{font-weight:bold;margin-bottom:5px}.assignment{background:#e8f1fb;padding:5px;border-radius:5px;margin:4px 0;font-size:12px}.assignment a{color:#164d7d}.assignment-finalized{background:#d9f2df;border-left:4px solid #25834a}.assignment-finalized .pill{background:#25834a;color:#fff}
+@media(max-width:700px){.calendar{grid-template-columns:1fr 1fr}.day{min-height:80px}table{font-size:13px}}
+</style></head><body>
+<header><div><strong>月間シフト管理（試作版）</strong> <span class="small">ログイン: {{ session.get("username") }}</span></div>
+<nav><a href="{{ url_for('index') }}">月間カレンダー</a>
+{% if session.get("role") == "admin" %}<a href="{{ url_for('requests_page') }}">希望休管理</a><a href="{{ url_for('integration_page') }}">従業員データ連携</a><a href="{{ url_for('employees_page') }}">従業員</a>
+{% else %}<a href="{{ url_for('my_requests_page') }}">希望休を提出</a>{% endif %}
+{% if session.get("role") == "admin" %}<a href="{{ url_for('patterns_page') }}">勤務パターン</a><a href="{{ url_for('coverage_page') }}">必要人数</a><a href="{{ url_for('import_page') }}">CSV取込</a><a href="{{ url_for('index',modal='warnings') }}">警告・確定</a>{% endif %}
+<a href="{{ url_for('password_page') }}">パスワード変更</a><a href="{{ url_for('logout') }}">ログアウト</a></nav></header>
+<main>
+{% with messages = get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}{% endwith %}
+{% block content %}{% endblock %}
+</main></body></html>

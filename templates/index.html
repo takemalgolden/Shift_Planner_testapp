@@ -1,0 +1,62 @@
+{% extends "base.html" %}{% block content %}
+<h1>月間シフトカレンダー</h1>
+{% if by_day.values()|selectattr(0, "defined")|list %}<p class="muted small">確定済みの勤務は緑色で表示されます。</p>{% endif %}
+<form method="get" class="card"><label>対象月 <input type="month" name="month" value="{{ month }}"></label> <button>表示</button>
+{% if session.get("role") == "admin" %}<button type="button" onclick="document.getElementById('generate').submit()">自動作成</button>
+<button type="button" onclick="openShiftModal('warnings')">警告・確定{% if warnings %}（{{ warnings|length }}件）{% endif %}</button>
+<a class="btn" href="{{ url_for('export_csv',month=month) }}">CSV出力</a>{% endif %}</form>
+{% if session.get("role") == "admin" %}<form id="generate" method="post" action="{{ url_for('generate') }}"><input type="hidden" name="month" value="{{ month }}"></form>{% endif %}
+<div class="card"><div class="calendar">
+{% for w in ["月","火","水","木","金","土","日"] %}<div class="dayhead">{{ w }}</div>{% endfor %}
+{% set first_offset = days[0].weekday() %}
+{% for i in range(first_offset) %}<div></div>{% endfor %}
+{% for d in days %}
+<div class="day"><div class="dayhead">{{ d.day }}日 <span class="muted small">{{ ["月","火","水","木","金","土","日"][d.weekday()] }}</span></div>
+{% for a in by_day.get(d.isoformat(),[]) %}
+<div class="assignment {% if a['status'] == 'finalized' %}assignment-finalized{% endif %}"><strong>{{ a["name"] }}</strong><br>{{ a["pattern_name"] }} {{ a["start_time"] }}–{{ a["end_time"] }}<br>担当: {{ a["skill"] }} <span class="pill">{% if a["status"] == "finalized" %}確定済み{% else %}仮シフト{% endif %}</span>
+{% if session.get("role") == "admin" %}<br><a href="{{ url_for('edit_assignment',assignment_id=a['id']) }}">編集</a>
+<form method="post" action="{{ url_for('delete_assignment',assignment_id=a['id']) }}" style="display:inline" onsubmit="return confirm('このシフトを削除しますか？')"><button class="danger" style="padding:3px 6px">削除</button></form>{% endif %}
+</div>{% endfor %}
+</div>{% endfor %}
+</div></div>
+<p class="muted small">自動作成は初期版の簡易ロジックです。必ず「警告・確定」で必要人数と休み希望を確認してください。</p>
+
+{% if session.get("role") == "admin" %}
+<style>
+.shift-modal-backdrop{position:fixed;inset:0;background:#0d1a2baa;display:none;align-items:center;justify-content:center;z-index:1000;padding:16px}
+.shift-modal-backdrop.open{display:flex}.shift-modal{width:min(740px,100%);max-height:88vh;overflow:auto;background:white;border-radius:14px;padding:22px;box-shadow:0 20px 70px #0005}
+.shift-modal-header{display:flex;justify-content:space-between;align-items:center;gap:12px}.shift-modal-header h2{margin:0}.shift-modal .modal-close{background:#e7ebf0;color:#233}
+.shift-modal .warning-scroll{max-height:36vh;overflow:auto}.shift-modal .modal-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+.shift-modal [hidden]{display:none!important}.shift-warning-count{font-weight:bold}
+</style>
+<div id="shift-modal-backdrop" class="shift-modal-backdrop" role="presentation" onclick="if(event.target===this)closeShiftModal()">
+<section class="shift-modal" role="dialog" aria-modal="true" aria-labelledby="shift-modal-title" tabindex="-1">
+<div class="shift-modal-header"><h2 id="shift-modal-title">警告・シフト確定</h2><button type="button" class="modal-close" onclick="closeShiftModal()" aria-label="閉じる">✕ 閉じる</button></div>
+<p>対象月：<strong>{{ month }}</strong></p>
+<div id="shift-panel-warnings">
+{% if warnings %}<p class="shift-warning-count">{{ warnings|length }}件の警告があります。</p><div class="warning-scroll">
+{% for w in warnings %}<div class="warning"><strong>{{ w.date }} — {{ w.kind }}</strong><div>{{ w.detail }}</div></div>{% endfor %}
+</div>{% else %}<p>現在、必要人数・希望休のチェック対象となる警告はありません。</p>{% endif %}
+{% set hard = warnings|selectattr('kind','equalto','確定休と勤務が重複')|list %}
+{% if hard %}<div class="warning">確定済み休暇と勤務が重複しています。該当シフトを修正するまで確定できません。</div>{% endif %}
+<div class="modal-actions"><form method="post" action="{{ url_for('finalize') }}"><input type="hidden" name="month" value="{{ month }}"><input type="hidden" name="stage" value="review"><button type="submit" {% if hard %}disabled{% endif %}>1段階目：警告を確認した</button></form>
+{% if first %}<button type="button" onclick="openShiftModal('final')" {% if hard %}disabled{% endif %}>2段階目へ進む</button>{% endif %}</div>
+</div>
+<div id="shift-panel-final" hidden>
+<p>警告・希望休・必要人数を再確認し、確定理由を記録してください。</p>
+{% if first %}<p>1段階目確認済み：{{ first.created_at }} / {{ first.admin_username }}</p>{% else %}<div class="warning">先に1段階目の確認を実施してください。</div>{% endif %}
+{% if warnings %}<p>{{ warnings|length }}件の警告が残っています。</p>{% endif %}
+<form method="post" action="{{ url_for('finalize') }}" onsubmit="return confirm('この月のシフトを最終確定しますか？')">
+<input type="hidden" name="month" value="{{ month }}"><input type="hidden" name="stage" value="final">
+<label class="field">最終確定の理由<textarea name="reason" rows="3" required placeholder="例：人員不足について管理者確認済み"></textarea></label>
+<div class="modal-actions"><button type="button" class="modal-close" onclick="openShiftModal('warnings')">警告一覧へ戻る</button><button type="submit" {% if not first or hard %}disabled{% endif %}>最終確定</button></div></form>
+</div>
+</section></div>
+<script>
+function openShiftModal(panel){const bg=document.getElementById('shift-modal-backdrop');if(!bg)return;bg.classList.add('open');document.getElementById('shift-panel-warnings').hidden=panel==='final';document.getElementById('shift-panel-final').hidden=panel!=='final';bg.querySelector('.shift-modal').focus();}
+function closeShiftModal(){document.getElementById('shift-modal-backdrop').classList.remove('open');}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeShiftModal();});
+const modalQuery=new URLSearchParams(location.search).get('modal');if(modalQuery==='warnings'||modalQuery==='final'||modalQuery==='result')openShiftModal(modalQuery==='final'?'final':'warnings');
+</script>
+{% endif %}
+{% endblock %}

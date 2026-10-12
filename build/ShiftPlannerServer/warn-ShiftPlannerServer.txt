@@ -14,9 +14,9 @@ Types of import:
 IMPORTANT: Do NOT post this list to the issue-tracker. Use it as a basis for
             tracking down the missing module yourself. Thanks!
 
-missing module named pwd - imported by shutil (top-level), tarfile (top-level), pathlib (top-level), subprocess (top-level), posixpath (top-level), http.server (top-level), getpass (top-level), setuptools._distutils.util (delayed, conditional, optional), netrc (top-level), setuptools._vendor.backports.tarfile (optional), setuptools._distutils.archive_util (top-level)
+missing module named pwd - imported by posixpath (top-level), shutil (top-level), tarfile (top-level), pathlib (top-level), subprocess (top-level), http.server (top-level), getpass (top-level), setuptools._distutils.util (delayed, conditional, optional), netrc (top-level), setuptools._vendor.backports.tarfile (optional), setuptools._distutils.archive_util (top-level)
 missing module named grp - imported by shutil (top-level), tarfile (top-level), pathlib (top-level), subprocess (top-level), setuptools._vendor.backports.tarfile (optional), setuptools._distutils.archive_util (top-level)
-missing module named posix - imported by shutil (top-level), importlib._bootstrap_external (top-level), os (top-level), posixpath (top-level)
+missing module named posix - imported by os (top-level), posixpath (top-level), shutil (top-level), importlib._bootstrap_external (top-level)
 missing module named resource - imported by posix (top-level)
 missing module named _frozen_importlib_external - imported by importlib (top-level), importlib._bootstrap (top-level), importlib.abc (top-level), zipimport (top-level)
 excluded module named _frozen_importlib - imported by importlib (top-level), importlib.abc (top-level), zipimport (top-level)

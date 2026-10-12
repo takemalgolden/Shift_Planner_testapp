@@ -1,5 +1,6 @@
 from flask import Flask, request, redirect, url_for, render_template, flash, session, send_file
-import sqlite3, os, csv, io, json, calendar, hashlib, hmac, secrets
+import sqlite3
+import re, os, csv, io, json, calendar, hashlib, hmac, secrets
 from datetime import date, datetime, timedelta
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -16,6 +17,12 @@ DEFAULT_SHIFTS = [
     ("半日午前", "09:20", "13:00", 0),
     ("半日午後", "18:00", "23:00", 0),
 ]
+
+def valid_password(value):
+    if not 8 <= len(value) <= 16:
+        return False
+    return sum((any(ch.isupper() for ch in value), any(ch.islower() for ch in value),
+                any(ch.isdigit() for ch in value), any(not ch.isalnum() for ch in value))) >= 3
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -63,6 +70,13 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """)
+        user_columns = {row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()}
+        if "must_change_password" not in user_columns:
+            c.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+        c.execute("""CREATE TABLE IF NOT EXISTS password_reset_audit (
+            id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, username_at_reset TEXT NOT NULL,
+            reset_by TEXT NOT NULL, reset_at TEXT NOT NULL
+        )""")
         # Migration for call-center employee linkage.
         employee_columns = {row[1] for row in c.execute("PRAGMA table_info(employees)").fetchall()}
         if "source_user_id" not in employee_columns:
@@ -159,6 +173,17 @@ def _authenticate_callcenter_user(username, password):
         return None
 
 
+@app.before_request
+def enforce_password_change():
+    if not session.get("username") or request.endpoint in ("password_page", "logout", "static", "login"):
+        return None
+    if session.get("callcenter_linked"):
+        return None
+    with db() as c:
+        row = c.execute("SELECT must_change_password FROM users WHERE username=?", (session["username"],)).fetchone()
+    if row and row["must_change_password"]:
+        return redirect(url_for("password_page"))
+
 @app.route("/login", methods=["GET","POST"])
 def login():
     if request.method == "POST":
@@ -166,9 +191,16 @@ def login():
         password = request.form.get("password","")
         with db() as c:
             u = c.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        if u and u["employee_id"]:
+            with db() as c:
+                emp_active = c.execute("SELECT active FROM employees WHERE id=?", (u["employee_id"],)).fetchone()
+            if not emp_active or not emp_active["active"]:
+                u = None
         if u and check_password_hash(u["password_hash"], password):
             session["username"], session["role"], session["employee_id"] = u["username"], u["role"], u["employee_id"]
             session["callcenter_linked"] = bool(u["employee_id"] and _employee_is_linked(u["employee_id"]))
+            if u["must_change_password"]:
+                return redirect(url_for("password_page"))
             return redirect(url_for("index"))
         # Linked operators may authenticate with the account used in the break-placement app.
         linked = _authenticate_callcenter_user(username, password)
@@ -224,7 +256,24 @@ def employees_page():
         action = request.form.get("action")
         try:
             with db() as c:
-                if action in ("add", "edit"):
+                if action == "reset_password":
+                    eid = int(request.form["employee_id"])
+                    target = c.execute("""SELECT u.id,u.username,e.source_user_id
+                        FROM users u JOIN employees e ON e.id=u.employee_id
+                        WHERE e.id=? AND u.role='operator'""", (eid,)).fetchone()
+                    if not target:
+                        raise ValueError("従業員アカウントが見つかりません。")
+                    if target["source_user_id"] is not None:
+                        raise ValueError("休憩時間配置アプリ連携アカウントのパスワードは連携元で変更してください。")
+                    new = request.form.get("new_password", "")
+                    if not valid_password(new):
+                        raise ValueError("パスワードは8〜16文字、大文字・小文字・数字・記号のうち3種類以上を含めてください。")
+                    c.execute("UPDATE users SET password_hash=?,must_change_password=1 WHERE id=?",
+                              (generate_password_hash(new), target["id"]))
+                    c.execute("""INSERT INTO password_reset_audit(user_id,username_at_reset,reset_by,reset_at)
+                                 VALUES(?,?,?,?)""", (target["id"],target["username"],session["username"],datetime.now().isoformat(timespec="seconds")))
+                    flash("パスワードを再設定しました。対象従業員は次回ログイン時に変更が必要です。")
+                elif action in ("add", "edit"):
                     name = request.form.get("name", "").strip()
                     skills_list = [x for x in request.form.getlist("skills") if x in ("consumer", "merchant", "PP")]
                     allowed = request.form.getlist("allowed")
@@ -238,23 +287,33 @@ def employees_page():
                         raise ValueError("勤務条件の数値を確認してください。")
                     values = (name, ",".join(skills_list), days, minimum, maximum, consecutive,
                               int("早番" in allowed), int("中番" in allowed), int("遅番" in allowed))
+                    username = request.form.get("username", "").strip()
+                    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
+                        raise ValueError("ログインIDは半角英数字・_・.・- の3～32文字で指定してください。")
+                    existing = c.execute("SELECT employee_id FROM users WHERE username=?", (username,)).fetchone()
+                    if existing and (action == "add" or existing["employee_id"] != int(request.form["employee_id"])):
+                        raise ValueError("このログインIDはすでに使用されています。")
                     if action == "add":
                         cur = c.execute("""INSERT INTO employees
                             (name,skills,monthly_days,min_hours,max_hours,max_consecutive,early_ok,mid_ok,late_ok)
                             VALUES(?,?,?,?,?,?,?,?,?)""", values)
                         eid = cur.lastrowid
-                        uname = "op" + str(eid)
-                        c.execute("INSERT OR IGNORE INTO users(username,password_hash,role,employee_id) VALUES(?,?,?,?)",
-                                  (uname, generate_password_hash("ChangeMe123!"), "operator", eid))
-                        flash(f"{name}さんを登録しました。ログインID: {uname} / 初期PW: ChangeMe123!（必ず変更してください）")
+                        c.execute("INSERT INTO users(username,password_hash,role,employee_id) VALUES(?,?,?,?)",
+                                  (username, generate_password_hash("ChangeMe123!"), "operator", eid))
+                        c.execute("UPDATE users SET must_change_password=1 WHERE employee_id=?", (eid,))
+                        flash(f"{name}さんを登録しました。ログインID: {username} / 初期PW: ChangeMe123!（必ず変更してください）")
                     else:
                         eid = int(request.form["employee_id"])
                         old = c.execute("SELECT id,source_user_id FROM employees WHERE id=?", (eid,)).fetchone()
                         if old is None:
                             raise ValueError("対象の従業員が見つかりません。")
+                        user_row = c.execute("SELECT id,username FROM users WHERE employee_id=? AND role='operator'", (eid,)).fetchone()
+                        if user_row is None:
+                            raise ValueError("対象従業員のログインアカウントが見つかりません。")
                         c.execute("""UPDATE employees SET name=?,skills=?,monthly_days=?,min_hours=?,max_hours=?,
                                      max_consecutive=?,early_ok=?,mid_ok=?,late_ok=? WHERE id=?""", values + (eid,))
-                        flash("従業員情報を更新しました。" +
+                        c.execute("UPDATE users SET username=? WHERE id=?", (username, user_row["id"]))
+                        flash("従業員情報とログインIDを更新しました。" +
                               (" ※連携元の氏名・スキルは次回同期で上書きされます。" if old["source_user_id"] is not None else ""))
                 elif action in ("delete", "restore"):
                     eid = int(request.form["employee_id"])
@@ -271,7 +330,8 @@ def employees_page():
             flash(f"操作できませんでした: {exc}", "error")
         return redirect(url_for("employees_page"))
     with db() as c:
-        rows = c.execute("SELECT * FROM employees ORDER BY active DESC,name").fetchall()
+        rows = c.execute("""SELECT e.*, (SELECT u.username FROM users u WHERE u.employee_id=e.id AND u.role='operator' ORDER BY u.id LIMIT 1) AS login_username
+                            FROM employees e ORDER BY e.active DESC,e.name""").fetchall()
     return render_template("employees.html", employees=rows)
 
 @app.route("/patterns", methods=["GET","POST"])
@@ -718,26 +778,31 @@ def password_page():
     if session.get("callcenter_linked"):
         flash("このアカウントは休憩時間配置アプリと連携しています。パスワード変更は休憩時間配置アプリ側で行ってください。", "error")
         return redirect(url_for("index"))
+    forced = False
+    with db() as c:
+        account = c.execute("SELECT * FROM users WHERE username=?", (session["username"],)).fetchone()
+    if account is None:
+        session.clear()
+        return redirect(url_for("login"))
+    forced = bool(account["must_change_password"])
     if request.method == "POST":
-        old, new = request.form.get("old_password",""), request.form.get("new_password","")
-        if len(new) < 8 or len(new) > 16 or sum(bool(any(ch.isupper() for ch in new),) for _ in []) > 3:
-            flash("新しいパスワードは8〜16文字にしてください。", "error")
+        old, new = request.form.get("old_password", ""), request.form.get("new_password", "")
+        confirm = request.form.get("confirm_password", "")
+        if not valid_password(new):
+            flash("新しいパスワードは8〜16文字で、4種類の文字種のうち3種類以上を含めてください。", "error")
+        elif new != confirm:
+            flash("新しいパスワードの確認が一致しません。", "error")
+        elif not check_password_hash(account["password_hash"], old):
+            flash("現在のパスワードが違います。", "error")
+        elif check_password_hash(account["password_hash"], new):
+            flash("現在とは異なるパスワードを設定してください。", "error")
         else:
-            categories = [any(ch.isupper() for ch in new), any(ch.islower() for ch in new),
-                          any(ch.isdigit() for ch in new), any(not ch.isalnum() for ch in new)]
-            if sum(categories) < 3:
-                flash("大文字・小文字・数字・記号のうち3種類以上を含めてください。", "error")
-            else:
-                with db() as c:
-                    u = c.execute("SELECT * FROM users WHERE username=?", (session["username"],)).fetchone()
-                    if not check_password_hash(u["password_hash"], old):
-                        flash("現在のパスワードが違います。", "error")
-                    else:
-                        c.execute("UPDATE users SET password_hash=? WHERE username=?",
-                                  (generate_password_hash(new),session["username"]))
-                        flash("パスワードを変更しました。")
-                        return redirect(url_for("index"))
-    return render_template("password.html")
+            with db() as c:
+                c.execute("UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?",
+                          (generate_password_hash(new),account["id"]))
+            flash("パスワードを変更しました。")
+            return redirect(url_for("index"))
+    return render_template("password.html", forced=forced)
 
 if __name__ == "__main__":
     init_db()

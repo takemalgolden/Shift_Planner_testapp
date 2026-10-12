@@ -1,10 +1,11 @@
 {% extends "base.html" %}{% block content %}
 <h1>従業員管理</h1>
 <p class="muted">編集・無効化・再有効化ができます。無効化しても過去のシフトや希望休は削除されません。</p>
-<div class="card"><h2>従業員を追加</h2>
+<div class="card"><h2>従業員を追加</h2><p class="small muted">ログインIDは半角英数字・_・.・- の3～32文字。既存IDとの重複は登録できません。</p>
 <form method="post"><input type="hidden" name="action" value="add">
 <div class="grid">
 <label class="field">氏名<input name="name" required></label>
+<label class="field">ログインID<input name="username" pattern="[A-Za-z0-9_.-]{3,32}" minlength="3" maxlength="32" placeholder="例: tanaka01" required></label>
 <label class="field">月間勤務日数目安<input name="monthly_days" type="number" min="0" max="31" value="20" required></label>
 <label class="field">最小勤務時間<input name="min_hours" type="number" min="0" max="24" step=".5" value="4" required></label>
 <label class="field">最大勤務時間<input name="max_hours" type="number" min="0" max="24" step=".5" value="9" required></label>
@@ -14,14 +15,15 @@
 <p>勤務可能: {% for label in ["早番","中番","遅番"] %}<label><input type="checkbox" name="allowed" value="{{ label }}" checked>{{ label }}</label> {% endfor %}</p>
 <button type="submit">登録</button></form></div>
 <div class="card"><h2>登録済み従業員</h2>
-<div style="overflow-x:auto"><table><thead><tr><th>氏名</th><th>スキル</th><th>勤務条件</th><th>状態・連携</th><th>操作</th></tr></thead><tbody>
+<div style="overflow-x:auto"><table><thead><tr><th>氏名</th><th>ログインID</th><th>スキル</th><th>勤務条件</th><th>状態・連携</th><th>操作</th></tr></thead><tbody>
 {% for e in employees %}
-<tr><td>{{ e.name }}</td><td>{{ e.skills }}</td><td>月{{ e.monthly_days }}日 / {{ e.min_hours }}〜{{ e.max_hours }}時間 / 最大{{ e.max_consecutive }}連勤</td>
+<tr><td>{{ e.name }}</td><td><code>{{ e.login_username or "未設定" }}</code></td><td>{{ e.skills }}</td><td>月{{ e.monthly_days }}日 / {{ e.min_hours }}〜{{ e.max_hours }}時間 / 最大{{ e.max_consecutive }}連勤</td>
 <td>{{ "有効" if e.active else "無効" }}{% if e.source_user_id is not none %}<div class="small muted">休憩アプリ連携</div>{% endif %}</td>
 <td><details><summary style="cursor:pointer">編集</summary>
 <form method="post" style="min-width:230px;margin-top:10px">
 <input type="hidden" name="action" value="edit"><input type="hidden" name="employee_id" value="{{ e.id }}">
 <label class="field">氏名<input name="name" value="{{ e.name }}" required></label>
+<label class="field">ログインID<input name="username" value="{{ e.login_username or '' }}" pattern="[A-Za-z0-9_.-]{3,32}" minlength="3" maxlength="32" required></label>
 <label class="field">月間勤務日数<input name="monthly_days" type="number" min="0" max="31" value="{{ e.monthly_days }}" required></label>
 <label class="field">最小勤務時間<input name="min_hours" type="number" min="0" max="24" step=".5" value="{{ e.min_hours }}" required></label>
 <label class="field">最大勤務時間<input name="max_hours" type="number" min="0" max="24" step=".5" value="{{ e.max_hours }}" required></label>
@@ -33,7 +35,16 @@
 <input type="hidden" name="employee_id" value="{{ e.id }}">
 {% if e.active %}<input type="hidden" name="action" value="delete"><button class="danger" type="submit">無効化</button>
 {% else %}<input type="hidden" name="action" value="restore"><button type="submit">再有効化</button>{% endif %}
-</form></td></tr>
+</form>
+{% if e.source_user_id is none and e.login_username %}
+<details style="margin-top:8px"><summary style="cursor:pointer">パスワード再設定</summary>
+<form method="post" style="min-width:230px;margin-top:8px" onsubmit="return confirm('この従業員のパスワードを再設定しますか？')">
+<input type="hidden" name="action" value="reset_password"><input type="hidden" name="employee_id" value="{{ e.id }}">
+<label class="field">新しい仮パスワード（8〜16文字）<span style="display:flex;gap:4px"><input type="password" name="new_password" id="reset_pw_{{ e.id }}" minlength="8" maxlength="16" autocomplete="new-password" required><button type="button" onclick="let x=document.getElementById('reset_pw_{{ e.id }}');x.type=x.type==='password'?'text':'password'">表示/非表示</button></span></label>
+<p class="small muted">大文字・小文字・数字・記号のうち3種類以上。次回ログイン時に変更が必要です。</p>
+<button type="submit">パスワードを再設定</button></form></details>
+{% elif e.source_user_id is not none %}<p class="small muted">PW変更は休憩アプリ側で行ってください。</p>{% endif %}
+</td></tr>
 {% endfor %}
 </tbody></table></div>
 <p class="small muted">「削除」は安全のため無効化として実装しています。休憩アプリから同期した従業員の氏名・スキル・在籍状態は、次回の同期で連携元の値に戻ります。</p>

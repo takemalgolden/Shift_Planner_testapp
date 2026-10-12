@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% block content %}
+<h1>従業員の一括登録・更新</h1>
+<p><a href="{{ url_for('employees_page') }}">← 従業員管理に戻る</a>　<a href="{{ url_for('employees_import_template') }}">CSVテンプレートを取得</a></p>
+<div class="card"><p>Excel (.xlsx) / CSV (.csv)、最大2MB・500名。最初の行は見出しです。</p>
+<p>必須列：ログインID・氏名・スキル。その他の列は省略可能です。</p>
+<p class="small muted">スキルは consumer,merchant,PP をカンマ区切りで指定。勤務条件の省略値は月20日、4〜9時間、最大5連勤、早中遅すべて可です。</p>
+<form method="post" enctype="multipart/form-data"><input type="hidden" name="action" value="preview">
+<label class="field">ファイル<input type="file" name="file" accept=".xlsx,.csv" required></label>
+<label class="field">取込方法<select name="mode"><option value="new" {% if mode=='new' %}selected{% endif %}>新規登録のみ（既存IDはエラー）</option><option value="update" {% if mode=='update' %}selected{% endif %}>既存データを更新（未登録IDはエラー）</option></select></label>
+<button type="submit">内容をプレビュー</button></form></div>
+{% if rows %}<div class="card"><h2>プレビュー（{{ rows|length }}件）</h2>
+<p>エラーがある場合は、元のファイルを修正して再度読み込んでください。すべての行が正常な場合だけ一括反映できます。</p>
+<div style="overflow-x:auto"><table><thead><tr><th>行</th><th>ログインID</th><th>氏名</th><th>スキル</th><th>処理</th><th>判定</th></tr></thead><tbody>
+{% for r in rows %}<tr><td>{{ r.line }}</td><td>{{ r.values[0] if r.values else '-' }}</td><td>{{ r.values[1] if r.values else '-' }}</td><td>{{ r.values[2] if r.values else '-' }}</td><td>{{ r.status or '-' }}</td><td>{{ r.error or 'OK' }}</td></tr>{% endfor %}
+</tbody></table></div>
+{% if not rows|selectattr('error')|list %}<form method="post" onsubmit="return confirm('プレビューした{{ rows|length }}件を反映しますか？')"><input type="hidden" name="action" value="commit"><input type="hidden" name="token" value="{{ token }}"><button type="submit">{{ rows|length }}件を確定して取り込む</button></form>{% endif %}
+</div>{% endif %}{% endblock %}

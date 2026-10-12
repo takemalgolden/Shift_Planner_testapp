@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% block content %}
-<h1>従業員管理</h1>
+<h1>従業員管理</h1><p><a href="{{ url_for('employees_import_page') }}">Excel・CSVから一括登録／更新</a></p>
 <p class="muted">編集・無効化・再有効化ができます。無効化しても過去のシフトや希望休は削除されません。</p>
 <div class="card"><h2>従業員を追加</h2><p class="small muted">ログインIDは半角英数字・_・.・- の3～32文字。既存IDとの重複は登録できません。</p>
 <form method="post"><input type="hidden" name="action" value="add">

@@ -3,6 +3,7 @@ import sqlite3
 import re, os, csv, io, json, calendar, hashlib, hmac, secrets
 from datetime import date, datetime, timedelta
 from functools import wraps
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from werkzeug.security import generate_password_hash, check_password_hash
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -333,6 +334,144 @@ def employees_page():
         rows = c.execute("""SELECT e.*, (SELECT u.username FROM users u WHERE u.employee_id=e.id AND u.role='operator' ORDER BY u.id LIMIT 1) AS login_username
                             FROM employees e ORDER BY e.active DESC,e.name""").fetchall()
     return render_template("employees.html", employees=rows)
+
+
+IMPORT_COLUMNS = ["ログインID", "氏名", "スキル", "月間勤務日数", "最小勤務時間", "最大勤務時間", "最大連勤", "早番", "中番", "遅番"]
+
+def parse_import_file(upload):
+    filename = (upload.filename or "").lower()
+    data = upload.stream.read(2 * 1024 * 1024 + 1)
+    if len(data) > 2 * 1024 * 1024:
+        raise ValueError("ファイルは2MB以下にしてください。")
+    if filename.endswith(".csv"):
+        try:
+            content = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            content = data.decode("cp932")
+        records = list(csv.reader(io.StringIO(content)))
+    elif filename.endswith(".xlsx"):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        try:
+            records = list(wb.active.iter_rows(values_only=True, max_row=502))
+        finally:
+            wb.close()
+    else:
+        raise ValueError(".xlsx または .csv ファイルを選択してください。")
+    if not records:
+        raise ValueError("ファイルが空です。")
+    header = [str(v).strip() if v is not None else "" for v in records[0]]
+    required = ["ログインID", "氏名", "スキル"]
+    if any(h not in header for h in required):
+        raise ValueError("必須列がありません: " + ", ".join(required))
+    if len(records) > 501:
+        raise ValueError("一度に取り込めるのは500名までです。")
+    results = []
+    for lineno, record in enumerate(records[1:], 2):
+        if not any(v is not None and str(v).strip() for v in record):
+            continue
+        raw = {h: record[i] if i < len(record) else None for i,h in enumerate(header) if h}
+        try:
+            username = str(raw.get("ログインID") or "").strip()
+            name = str(raw.get("氏名") or "").strip()
+            skills = [x.strip() for x in re.split(r"[,、，/]+", str(raw.get("スキル") or "")) if x.strip()]
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
+                raise ValueError("ログインIDは半角英数字・_.- の3〜32文字")
+            if not name or len(name) > 100:
+                raise ValueError("氏名は1〜100文字")
+            if not skills or any(x not in ("consumer", "merchant", "PP") for x in skills):
+                raise ValueError("スキルはconsumer,merchant,PPのいずれか")
+            def number(field, default, typ):
+                value = raw.get(field)
+                return typ(value) if value is not None and str(value).strip() else default
+            days = number("月間勤務日数", 20, int)
+            min_h = number("最小勤務時間", 4, float)
+            max_h = number("最大勤務時間", 9, float)
+            consecutive = number("最大連勤", 5, int)
+            if not (0 <= days <= 31 and 0 <= min_h <= max_h <= 24 and 1 <= consecutive <= 31):
+                raise ValueError("勤務条件の範囲が不正")
+            def flag(field):
+                value = str(raw.get(field) if raw.get(field) is not None else "1").strip().lower()
+                if value in ("1", "yes", "true", "可", "○", "〇", "はい"): return 1
+                if value in ("0", "no", "false", "不可", "×", "いいえ"): return 0
+                raise ValueError(field + "は1/0または可/不可")
+            values = [username, name, ",".join(dict.fromkeys(skills)), days, min_h, max_h, consecutive,
+                      flag("早番"), flag("中番"), flag("遅番")]
+            results.append({"line":lineno,"values":values,"error":""})
+        except (ValueError, TypeError) as exc:
+            results.append({"line":lineno,"values":[],"error":str(exc)})
+    if not results:
+        raise ValueError("従業員データがありません。")
+    seen=set()
+    for item in results:
+        if item["values"]:
+            key=item["values"][0]
+            if key in seen: item["error"]="ファイル内でログインIDが重複"
+            seen.add(key)
+    return results
+
+@app.route("/employees/import", methods=["GET", "POST"])
+@login_required
+@admin_required
+def employees_import_page():
+    rows=[]; token=None; mode="new"
+    signer=URLSafeTimedSerializer(app.secret_key, salt="employee-import-v1")
+    if request.method == "POST":
+        mode=request.form.get("mode", "new")
+        if mode not in ("new", "update"): mode="new"
+        if request.form.get("action")=="preview":
+            try:
+                rows=parse_import_file(request.files["file"])
+                with db() as c:
+                    existing={r["username"]:r for r in c.execute("SELECT username,employee_id FROM users")}
+                for row in rows:
+                    if row["error"]: continue
+                    username=row["values"][0]
+                    user=existing.get(username)
+                    row["status"]="更新" if user else "新規"
+                    if user and user["employee_id"] is None: row["error"]="管理者ID等は更新不可"
+                    elif user and mode=="new": row["error"]="登録済みID（新規登録モード）"
+                    elif not user and mode=="update": row["error"]="未登録ID（更新モード）"
+                token=signer.dumps({"rows":rows,"mode":mode})
+            except Exception as exc:
+                flash("ファイルを読み込めませんでした: " + str(exc), "error")
+        elif request.form.get("action")=="commit":
+            try:
+                payload=signer.loads(request.form.get("token", ""), max_age=900)
+                rows=payload["rows"]; mode=payload["mode"]
+                if len(rows)>500 or mode not in ("new", "update") or any(r["error"] for r in rows):
+                    raise ValueError("エラー行があります。ファイルを修正して再度プレビューしてください。")
+                with db() as c:
+                    for row in rows:
+                        username,name,skills,days,min_h,max_h,consecutive,early,mid,late=row["values"]
+                        existing=c.execute("SELECT employee_id FROM users WHERE username=?",(username,)).fetchone()
+                        if mode=="new":
+                            if existing: raise ValueError(username+" は既に登録されています。")
+                            cur=c.execute("""INSERT INTO employees(name,skills,monthly_days,min_hours,max_hours,max_consecutive,early_ok,mid_ok,late_ok)
+                              VALUES(?,?,?,?,?,?,?,?,?)""",(name,skills,days,min_h,max_h,consecutive,early,mid,late))
+                            c.execute("INSERT INTO users(username,password_hash,role,employee_id,must_change_password) VALUES(?,?,?,?,1)",
+                                      (username,generate_password_hash("ChangeMe123!"),"operator",cur.lastrowid))
+                        else:
+                            if not existing or existing["employee_id"] is None: raise ValueError(username+" は更新できません。")
+                            c.execute("""UPDATE employees SET name=?,skills=?,monthly_days=?,min_hours=?,max_hours=?,max_consecutive=?,
+                              early_ok=?,mid_ok=?,late_ok=? WHERE id=?""",
+                              (name,skills,days,min_h,max_h,consecutive,early,mid,late,existing["employee_id"]))
+                flash(f"{len(rows)}件の{'新規登録' if mode=='new' else '更新'}が完了しました。")
+                return redirect(url_for("employees_page"))
+            except (BadSignature, SignatureExpired):
+                flash("確認データの期限が切れました。再度ファイルを読み込んでください。", "error")
+            except (ValueError, sqlite3.Error, KeyError, TypeError) as exc:
+                flash("取り込みを中止しました（データは変更されていません）: " + str(exc), "error")
+    return render_template("employees_import.html", rows=rows, token=token, mode=mode)
+
+@app.route("/employees/import/template.csv")
+@login_required
+@admin_required
+def employees_import_template():
+    out=io.StringIO(); writer=csv.writer(out); writer.writerow(IMPORT_COLUMNS)
+    writer.writerow(["tanaka01","田中太郎","consumer,PP",20,4,9,5,1,1,1])
+    content=io.BytesIO(("\ufeff"+out.getvalue()).encode("utf-8"))
+    return send_file(content, mimetype="text/csv", as_attachment=True, download_name="employees_template.csv")
 
 @app.route("/patterns", methods=["GET","POST"])
 @login_required

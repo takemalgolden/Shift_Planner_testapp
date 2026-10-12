@@ -18,7 +18,7 @@ table{border-collapse:collapse;width:100%;background:white}th,td{border:1px soli
 </style></head><body>
 <header><div><strong>月間シフト管理（試作版）</strong> <span class="small">ログイン: {{ session.get("username") }}</span></div>
 <nav><a href="{{ url_for('index') }}">月間カレンダー</a>
-{% if session.get("role") == "admin" %}<a href="{{ url_for('requests_page') }}">希望休管理</a><a href="{{ url_for('integration_page') }}">従業員データ連携</a><a href="{{ url_for('employees_page') }}">従業員</a>
+{% if session.get("role") == "admin" %}<a href="{{ url_for('requests_page') }}">希望休管理</a><a href="{{ url_for('integration_page') }}">従業員データ連携</a><a href="{{ url_for('employees_page') }}">従業員</a><a href="{{ url_for('registration_requests_page') }}">登録申請</a>
 {% else %}<a href="{{ url_for('my_requests_page') }}">希望休を提出</a>{% endif %}
 {% if session.get("role") == "admin" %}<a href="{{ url_for('patterns_page') }}">勤務パターン</a><a href="{{ url_for('coverage_page') }}">必要人数</a><a href="{{ url_for('import_page') }}">休暇データ取込・出力</a><a href="{{ url_for('index',modal='warnings') }}">警告・確定</a>{% endif %}
 <a href="{{ url_for('password_page') }}">パスワード変更</a><a href="{{ url_for('logout') }}">ログアウト</a></nav></header>

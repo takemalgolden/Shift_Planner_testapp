@@ -1,19 +1,18 @@
 {% extends "base.html" %}{% block content %}
 <h1>オペレーター双方向同期</h1>
-<div class="warning"><strong>同期は管理者が手動実行します。</strong>同期方向を選択してください。両方で同じ項目を変更した場合、選んだ方向のデータが優先されます。同期前に両アプリのSQLite DBをバックアップしてください。管理者アカウント・パスワード・シフト・休憩予定は同期対象外です。</div>
-<div class="card"><h2>休憩管理アプリのデータベース</h2>
-<form method="post"><label class="field">callcenter.sqlite3 の絶対パス<input name="db_path" value="{{ db_path }}" style="width:100%" required></label>
-<p class="muted">両アプリが同じ管理者PCで動作し、このファイルに読み書きできる必要があります。EXE版の標準保存先：%LOCALAPPDATA%\CallCenterLocal\data\callcenter.sqlite3</p>
+<div class="warning"><strong>実行前に両アプリを停止し、両方のSQLiteファイルをバックアップしてください。</strong> 同期は管理者PCのローカルディスクにあるSQLiteファイルに対して行います。ネットワーク共有上のSQLiteを直接編集しないでください。</div>
+<div class="card"><h2>休憩時間配置アプリのデータベース</h2>
+<form method="post"><label class="field">callcenter.sqlite3 のフルパス<input style="width:100%" name="db_path" value="{{ db_path }}" required></label>
+<p class="muted">EXE版の例：%LOCALAPPDATA%\CallCenterLocal\data\callcenter.sqlite3（実際のパスを指定）</p>
 <button name="action" value="save_path">パスを保存</button>
-<button name="action" value="break_to_shift" onclick="return confirm('休憩管理アプリの登録情報をシフト作成アプリへ反映します。続行しますか？')">休憩管理 → シフト作成</button>
-<button name="action" value="shift_to_break" onclick="return confirm('シフト作成アプリの登録情報を休憩管理アプリへ反映します。続行しますか？')">シフト作成 → 休憩管理</button>
+<h3>同じ従業員の情報が異なる場合</h3>
+<label><input type="radio" name="conflict_policy" value="skip" checked>変更せず保留（安全・推奨）</label><br>
+<label><input type="radio" name="conflict_policy" value="shift">シフト作成アプリ側を優先</label><br>
+<label><input type="radio" name="conflict_policy" value="break">休憩時間配置アプリ側を優先</label>
+<p><button name="action" value="sync" onclick="return confirm('両アプリの停止とDBバックアップを確認しましたか？ 双方向同期を実行します。')">双方向同期を実行</button></p>
 </form>
-{% if preview_count is not none %}<p>休憩管理アプリのオペレーター：{{ preview_count }}名</p>{% endif %}
-</div>
-<div class="card"><h2>同期対象と注意</h2>
-<p>同期対象：ログインID、氏名、在籍状態、スキル（Consumer / Merchant / PP）、アカウントの紐付け。削除は行いません。勤務時間・パスワード・権限・シフト・休憩予定は変更しません。</p>
-<p>シフト作成 → 休憩管理で新規作成されたアカウントには、一時パスワードが発行されます。下に表示された場合は安全に保管し、本人へ別経路で伝えてください。既存アカウントのパスワードは維持されます。</p>
-<p>両アプリでログインIDを別々に変更すると競合する場合があります。その場合はIDを統一して再実行してください。</p></div>
-{% if credentials %}<div class="card"><h2>新規登録アカウントの一時パスワード（この画面でのみ表示）</h2>
-<table><tr><th>ログインID</th><th>一時パスワード</th></tr>{% for username, password in credentials %}<tr><td>{{username}}</td><td><code>{{password}}</code></td></tr>{% endfor %}</table></div>{% endif %}
+<p>休憩アプリで確認できるオペレーター数：{{ preview_count if preview_count is not none else '参照できません' }}</p></div>
+<div class="card"><h2>同期内容</h2><p>ログインID・氏名・スキル・在籍状態を同期します。従業員IDの紐付けを保持し、同じアカウントを繰り返し作成しないようにします。管理者アカウントは同期しません。</p>
+<p><strong>パスワードは同期しません。</strong> 休憩アプリに新規追加されたアカウントにはランダムなパスワードを設定します。休憩アプリの管理画面からパスワードを再設定してください。シフトアプリに休憩アプリ由来のアカウントが追加された場合は、休憩アプリ側のパスワードでログインします。</p>
+<p class="muted">氏名・スキル・在籍状態の違いは競合として扱います。競合時の優先元を指定すると、指定した側の値で上書きします。既存のシフトや希望休は削除しません。ログインID衝突が検出された場合は同期を中止してください。</p></div>
 {% endblock %}

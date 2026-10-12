@@ -1,6 +1,5 @@
 from flask import Flask, request, redirect, url_for, render_template, flash, session, send_file
 import sqlite3
-import realtime_sync
 import re, os, csv, io, json, calendar, hashlib, hmac, secrets
 from datetime import date, datetime, timedelta
 from functools import wraps
@@ -78,6 +77,12 @@ def init_db():
         c.execute("""CREATE TABLE IF NOT EXISTS password_reset_audit (
             id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, username_at_reset TEXT NOT NULL,
             reset_by TEXT NOT NULL, reset_at TEXT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS operator_registration_requests (
+          id INTEGER PRIMARY KEY, username TEXT NOT NULL, name TEXT NOT NULL,
+          password_hash TEXT NOT NULL, skills TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL,
+          reviewed_at TEXT, reviewed_by TEXT
         )""")
         # Migration for call-center employee linkage.
         employee_columns = {row[1] for row in c.execute("PRAGMA table_info(employees)").fetchall()}
@@ -177,7 +182,7 @@ def _authenticate_callcenter_user(username, password):
 
 @app.before_request
 def enforce_password_change():
-    if not session.get("username") or request.endpoint in ("password_page", "logout", "static", "login"):
+    if not session.get("username") or request.endpoint in ("password_page", "logout", "static", "login", "register_operator"):
         return None
     if session.get("callcenter_linked"):
         return None
@@ -216,6 +221,69 @@ def login():
                 return redirect(url_for("index"))
         flash("ユーザー名またはパスワードが違います。", "error")
     return render_template("login.html")
+
+@app.route("/register", methods=["GET", "POST"])
+def register_operator():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        name = request.form.get("name", "").strip()
+        password = request.form.get("password", "")
+        confirm = request.form.get("confirm_password", "")
+        skills = [s for s in ("consumer", "merchant", "PP") if s in request.form.getlist("skills")]
+        error = None
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
+            error = "ログインIDは半角英数字・_・.・- の3～32文字で入力してください。"
+        elif not name or len(name) > 100:
+            error = "氏名を100文字以内で入力してください。"
+        elif not valid_password(password):
+            error = "パスワードは8～16文字で、大文字・小文字・数字・記号のうち3種類以上が必要です。"
+        elif password != confirm:
+            error = "確認用パスワードが一致しません。"
+        elif not skills:
+            error = "保有スキルを1つ以上選択してください。"
+        else:
+            with db() as c:
+                if c.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone() or c.execute(
+                    "SELECT 1 FROM operator_registration_requests WHERE username=? AND status='pending'", (username,)).fetchone():
+                    error = "このログインIDは登録済み、または承認待ちです。"
+                else:
+                    c.execute("""INSERT INTO operator_registration_requests
+                        (username,name,password_hash,skills,created_at) VALUES(?,?,?,?,?)""",
+                        (username,name,generate_password_hash(password),",".join(skills),datetime.now().isoformat(timespec="seconds")))
+                    flash("登録申請を受け付けました。管理者の承認後にログインできます。")
+                    return redirect(url_for("login"))
+        flash(error, "error")
+    return render_template("register.html")
+
+@app.route("/registration-requests", methods=["GET", "POST"])
+@login_required
+@admin_required
+def registration_requests_page():
+    if request.method == "POST":
+        try:
+            request_id = int(request.form.get("request_id", "0"))
+            action = request.form.get("action")
+            if action not in ("approve", "reject"):
+                raise ValueError("不正な操作です。")
+            with db() as c:
+                row = c.execute("SELECT * FROM operator_registration_requests WHERE id=? AND status='pending'", (request_id,)).fetchone()
+                if row is None:
+                    raise ValueError("申請が見つからないか、すでに処理されています。")
+                if action == "approve":
+                    if c.execute("SELECT 1 FROM users WHERE username=?", (row["username"],)).fetchone():
+                        raise ValueError("同じログインIDがすでに登録されています。")
+                    cur = c.execute("INSERT INTO employees(name,skills,active) VALUES(?,?,1)", (row["name"],row["skills"]))
+                    c.execute("""INSERT INTO users(username,password_hash,role,employee_id,must_change_password)
+                        VALUES(?,?, 'operator', ?, 0)""", (row["username"],row["password_hash"],cur.lastrowid))
+                c.execute("""UPDATE operator_registration_requests SET status=?,reviewed_at=?,reviewed_by=? WHERE id=?""",
+                          ("approved" if action == "approve" else "rejected",datetime.now().isoformat(timespec="seconds"),session["username"],request_id))
+                flash("申請を承認しました。" if action == "approve" else "申請を却下しました。")
+        except (ValueError,sqlite3.Error) as exc:
+            flash(f"処理できませんでした: {exc}", "error")
+        return redirect(url_for("registration_requests_page"))
+    with db() as c:
+        rows = c.execute("SELECT * FROM operator_registration_requests WHERE status='pending' ORDER BY created_at,id").fetchall()
+    return render_template("registration_requests.html", rows=rows)
 
 @app.route("/logout")
 def logout():
@@ -474,26 +542,51 @@ def employees_import_template():
     content=io.BytesIO(("\ufeff"+out.getvalue()).encode("utf-8"))
     return send_file(content, mimetype="text/csv", as_attachment=True, download_name="employees_template.csv")
 
-@app.route("/patterns", methods=["GET","POST"])
+@app.route("/patterns", methods=["GET", "POST"])
 @login_required
 @admin_required
 def patterns_page():
+    time_options = [f"{hour:02d}:{minute:02d}" for hour in range(24) for minute in range(0, 60, 10)]
     if request.method == "POST":
-        with db() as c:
-            if request.form.get("action") == "add":
-                try:
-                    c.execute("INSERT INTO shift_patterns(name,start_time,end_time,break_minutes) VALUES(?,?,?,?)",
-                              (request.form["name"].strip(), request.form["start_time"], request.form["end_time"],
-                               int(request.form.get("break_minutes",60))))
-                    flash("勤務パターンを登録しました。")
-                except sqlite3.IntegrityError:
-                    flash("同じ勤務パターン名が既にあります。", "error")
-            elif request.form.get("action") == "delete":
-                c.execute("UPDATE shift_patterns SET active=0 WHERE id=?", (int(request.form["pattern_id"]),))
-                flash("勤務パターンを無効化しました。")
+        action = request.form.get("action")
+        try:
+            with db() as c:
+                if action in ("add", "update"):
+                    name = request.form.get("name", "").strip()
+                    start = request.form.get("start_time", "")
+                    end = request.form.get("end_time", "")
+                    break_minutes = int(request.form.get("break_minutes", 60))
+                    if not name or start not in time_options or end not in time_options:
+                        raise ValueError("名称と10分刻みの開始・終了時刻を指定してください。")
+                    if mins(end) <= mins(start):
+                        raise ValueError("終了時刻は開始時刻より後にしてください。")
+                    if not 0 <= break_minutes <= 240 or break_minutes >= mins(end) - mins(start):
+                        raise ValueError("休憩時間を確認してください。")
+                    if action == "add":
+                        c.execute("INSERT INTO shift_patterns(name,start_time,end_time,break_minutes) VALUES(?,?,?,?)",
+                                  (name, start, end, break_minutes))
+                        flash("勤務パターンを登録しました。")
+                    else:
+                        pattern_id = int(request.form["pattern_id"])
+                        active = int(request.form.get("active", "1"))
+                        if active not in (0, 1):
+                            raise ValueError("状態が不正です。")
+                        cur = c.execute("""UPDATE shift_patterns SET name=?,start_time=?,end_time=?,break_minutes=?,active=?
+                                           WHERE id=?""", (name, start, end, break_minutes, active, pattern_id))
+                        if cur.rowcount == 0:
+                            raise ValueError("勤務パターンが見つかりません。")
+                        flash("勤務パターンを更新しました。")
+                elif action == "delete":
+                    c.execute("UPDATE shift_patterns SET active=0 WHERE id=?", (int(request.form["pattern_id"]),))
+                    flash("勤務パターンを無効化しました。")
+                else:
+                    raise ValueError("不明な操作です。")
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            flash(f"勤務パターンを保存できませんでした: {exc}", "error")
+        return redirect(url_for("patterns_page"))
     with db() as c:
         patterns = c.execute("SELECT * FROM shift_patterns ORDER BY active DESC,start_time").fetchall()
-    return render_template("patterns.html", patterns=patterns)
+    return render_template("patterns.html", patterns=patterns, time_options=time_options)
 
 @app.route("/coverage", methods=["GET","POST"])
 @login_required
@@ -514,98 +607,21 @@ def coverage_page():
         rows = c.execute("SELECT * FROM coverage ORDER BY weekday,start_time,skill").fetchall()
     return render_template("coverage.html", rows=rows, weekdays=["月","火","水","木","金","土","日"])
 
-def sync_operator_records(path, direction):
-    """Synchronize operator profiles in one selected direction, never overwrite passwords.
+def _sync_skills_from_callcenter(value):
+    raw = json.loads(value or "[]")
+    if not isinstance(raw, list):
+        raise ValueError("スキル形式が不正です")
+    mapped = []
+    for x in raw:
+        v = {"Consumer":"consumer", "Merchant":"merchant", "PP":"PP", "consumer":"consumer", "merchant":"merchant"}.get(x)
+        if v and v not in mapped:
+            mapped.append(v)
+    return ",".join(mapped or ["consumer"])
 
-    The source of truth is selected explicitly on every run. Existing usernames
-    are matched only when not already linked to a different employee.
-    """
-    if direction not in ("break_to_shift", "shift_to_break"):
-        raise ValueError("同期方向が正しくありません。")
-    if os.path.realpath(path) == os.path.realpath(DB_PATH):
-        raise ValueError("異なるデータベースを指定してください。")
-    # Attach the other DB so both profile tables are modified in one connection.
-    # Existing SQLite WAL databases are supported; password changes are excluded.
-    with db() as c:
-        c.execute("ATTACH DATABASE ? AS breakdb", (path,))
-        try:
-            cols = {r[1] for r in c.execute("PRAGMA breakdb.table_info(users)")}
-            required = {"id", "username", "display_name", "role", "active", "skills", "shift_start", "shift_end", "salt", "password_hash"}
-            if not required.issubset(cols):
-                raise ValueError("休憩管理アプリのDB形式が一致しません。")
-            c.execute("SELECT 1 FROM breakdb.users LIMIT 1")
-            stats = {"created": 0, "updated": 0, "skipped": 0, "credentials": []}
-            if direction == "break_to_shift":
-                source = c.execute("SELECT * FROM breakdb.users WHERE role='operator' ORDER BY id").fetchall()
-                for su in source:
-                    username = su["username"]
-                    matched = c.execute("SELECT * FROM employees WHERE source_user_id=?", (su["id"],)).fetchone()
-                    account = c.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-                    if account and account["role"] != "operator":
-                        raise ValueError(f"管理者IDとの衝突: {username}")
-                    if account and matched and account["employee_id"] not in (None, matched["id"]):
-                        raise ValueError(f"IDの紐付けが競合: {username}")
-                    if account and not matched and account["employee_id"]:
-                        matched = c.execute("SELECT * FROM employees WHERE id=?", (account["employee_id"],)).fetchone()
-                        if matched and matched["source_user_id"] not in (None, su["id"]):
-                            raise ValueError(f"別のアカウントに紐付け済み: {username}")
-                    skills = json.loads(su["skills"] or "[]")
-                    mapped = [x for x in (dict(Consumer="consumer", Merchant="merchant", PP="PP").get(sk) for sk in skills) if x]
-                    mapped = list(dict.fromkeys(mapped)) or ["consumer"]
-                    if matched:
-                        eid = matched["id"]
-                        c.execute("UPDATE employees SET name=?,active=?,skills=?,source_user_id=?,source_username=? WHERE id=?",
-                                  (su["display_name"], su["active"], ",".join(mapped), su["id"], username, eid))
-                        stats["updated"] += 1
-                    else:
-                        cur = c.execute("INSERT INTO employees(name,active,skills,source_user_id,source_username) VALUES(?,?,?,?,?)",
-                                        (su["display_name"], su["active"], ",".join(mapped), su["id"], username))
-                        eid = cur.lastrowid
-                        stats["created"] += 1
-                    if account:
-                        c.execute("UPDATE users SET employee_id=? WHERE id=?", (eid, account["id"]))
-                    else:
-                        c.execute("INSERT INTO users(username,password_hash,role,employee_id) VALUES(?,?, 'operator', ?)",
-                                  (username, generate_password_hash(secrets.token_urlsafe(20)), eid))
-            else:
-                source = c.execute("""SELECT e.*, u.username AS login_username FROM employees e
-                    JOIN users u ON u.employee_id=e.id AND u.role='operator' ORDER BY e.id""").fetchall()
-                for emp in source:
-                    username = emp["login_username"]
-                    by_link = (c.execute("SELECT * FROM breakdb.users WHERE id=? AND role='operator'", (emp["source_user_id"],)).fetchone()
-                               if emp["source_user_id"] is not None else None)
-                    by_name = c.execute("SELECT * FROM breakdb.users WHERE username=?", (username,)).fetchone()
-                    if by_name and by_name["role"] != "operator":
-                        raise ValueError(f"休憩アプリ管理者IDとの衝突: {username}")
-                    if by_link and by_name and by_link["id"] != by_name["id"]:
-                        raise ValueError(f"リンク先とログインIDが競合: {username}")
-                    target = by_link or by_name
-                    skills = [dict(consumer="Consumer", merchant="Merchant", PP="PP").get(sk.strip())
-                              for sk in (emp["skills"] or "").split(",")]
-                    skills = list(dict.fromkeys(x for x in skills if x)) or ["Consumer"]
-                    if target:
-                        c.execute("""UPDATE breakdb.users SET username=?,display_name=?,active=?,skills=? WHERE id=?""",
-                                  (username, emp["name"], emp["active"], json.dumps(skills), target["id"]))
-                        uid = target["id"]
-                        stats["updated"] += 1
-                    else:
-                        # New accounts receive a random temporary password. No existing password is overwritten.
-                        password = "T" + secrets.token_urlsafe(9)[:11] + "7!"
-                        salt = secrets.token_hex(16)
-                        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 240000).hex()
-                        cur = c.execute("""INSERT INTO breakdb.users
-                          (username,display_name,role,salt,password_hash,active,skills,shift_start,shift_end)
-                          VALUES(?,?,'operator',?,?,?,?,?,?)""",
-                          (username,emp["name"],salt,digest,emp["active"],json.dumps(skills),"09:00","18:00"))
-                        uid = cur.lastrowid
-                        stats["credentials"].append((username, password))
-                        stats["created"] += 1
-                    c.execute("UPDATE employees SET source_user_id=?,source_username=? WHERE id=?", (uid, username, emp["id"]))
-            c.execute("INSERT INTO settings(key,value) VALUES('callcenter_db_path',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (path,))
-            return stats
-        finally:
-            # ATTACH is closed when the context-managed connection is garbage-collected.
-            pass
+
+def _sync_skills_to_callcenter(value):
+    mapping = {"consumer":"Consumer", "merchant":"Merchant", "PP":"PP"}
+    return json.dumps([mapping[x] for x in (value or "").split(",") if x in mapping], ensure_ascii=False)
 
 
 @app.route("/integration", methods=["GET", "POST"])
@@ -613,36 +629,124 @@ def sync_operator_records(path, direction):
 @admin_required
 def integration_page():
     path = _callcenter_db_path()
-    credentials = []
-    if request.method == "POST":
-        raw_path = request.form.get("db_path", "").strip()
-        path = os.path.abspath(os.path.expandvars(raw_path)) if raw_path else ""
-        if not os.path.isfile(path):
-            flash("休憩管理アプリのSQLiteファイルが見つかりません。", "error")
-        else:
-            try:
-                action = request.form.get("action")
-                if action == "save_path":
-                    with db() as c:
-                        c.execute("INSERT INTO settings(key,value) VALUES('callcenter_db_path',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (path,))
-                    flash("接続先を保存しました。")
-                elif action in ("break_to_shift", "shift_to_break"):
-                    result = sync_operator_records(path, action)
-                    credentials = result["credentials"]
-                    flash(f"同期完了：新規 {result['created']}名・更新 {result['updated']}名。既存のパスワードは変更していません。")
-                else:
-                    flash("同期方向を選択してください。", "error")
-            except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError) as exc:
-                flash(f"同期に失敗しました: {exc}", "error")
     preview_count = None
-    realtime_status = realtime_sync.status()
-    if path and os.path.isfile(path):
+    if request.method == "POST":
+        path = os.path.abspath(request.form.get("db_path", "").strip())
+        if not os.path.isfile(path):
+            flash("指定されたSQLiteファイルが見つかりません。", "error")
+            return redirect(url_for("integration_page"))
+        action = request.form.get("action", "save_path")
         try:
-            with sqlite3.connect(path) as src:
-                preview_count = src.execute("SELECT COUNT(*) FROM users WHERE role='operator'").fetchone()[0]
+            with db() as c:
+                c.execute("INSERT INTO settings(key,value) VALUES('callcenter_db_path',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (path,))
+            if action == "save_path":
+                flash("連携先データベースのパスを保存しました。")
+                return redirect(url_for("integration_page"))
+            if action != "sync":
+                raise ValueError("不明な操作です")
+            policy = request.form.get("conflict_policy", "skip")
+            if policy not in ("skip", "shift", "break"):
+                raise ValueError("競合時の設定が不正です")
+            # Attach both databases to a single connection for coordinated writes.
+            # A local disk and both apps stopped are strongly recommended for reliable SQLite transactions.
+            with db() as c:
+                c.execute("ATTACH DATABASE ? AS callcenter", (path,))
+                columns = {r[1] for r in c.execute("PRAGMA callcenter.table_info(users)")}
+                required = {"id","username","display_name","role","active","skills","salt","password_hash","shift_start","shift_end"}
+                if not required.issubset(columns):
+                    raise ValueError("休憩アプリのusersテーブル形式が一致しません")
+                c.execute("BEGIN IMMEDIATE")
+                remote = {r["id"]:r for r in c.execute("SELECT * FROM callcenter.users WHERE role='operator'")}
+                local = c.execute("""SELECT e.*,u.id AS account_id,u.username FROM employees e
+                    LEFT JOIN users u ON u.employee_id=e.id AND u.role='operator' ORDER BY e.id""").fetchall()
+                remote_by_name = {r["username"]:r for r in remote.values()}
+                linked_remote_ids = set()
+                counts = {"remote_to_local":0,"local_to_remote":0,"conflicts":0,"skipped":0}
+                # Local records already linked to a remote account are updated in the selected direction.
+                for e in local:
+                    rid = e["source_user_id"]
+                    r = remote.get(rid) if rid is not None else None
+                    if r is None and e["username"]:
+                        r = remote_by_name.get(e["username"])
+                    if r is None:
+                        continue
+                    if rid is not None and rid != r["id"]:
+                        counts["skipped"] += 1
+                        continue
+                    if r["id"] in linked_remote_ids:
+                        counts["skipped"] += 1
+                        continue
+                    if not e["account_id"] or not e["username"]:
+                        counts["skipped"] += 1
+                        continue
+                    linked_remote_ids.add(r["id"])
+                    local_data = (e["name"], int(e["active"]), e["skills"])
+                    remote_data = (r["display_name"], int(r["active"]), _sync_skills_from_callcenter(r["skills"]))
+                    # A conflict is any difference on shared fields. Never silently overwrite.
+                    if local_data != remote_data:
+                        counts["conflicts"] += 1
+                        if policy == "skip":
+                            counts["skipped"] += 1
+                            continue
+                    if policy == "shift":
+                        c.execute("UPDATE callcenter.users SET display_name=?,active=?,skills=? WHERE id=?",
+                                  (e["name"],e["active"],_sync_skills_to_callcenter(e["skills"]),r["id"]))
+                        counts["local_to_remote"] += 1
+                    else:
+                        c.execute("UPDATE employees SET name=?,active=?,skills=?,source_user_id=?,source_username=? WHERE id=?",
+                                  (r["display_name"],r["active"],remote_data[2],r["id"],r["username"],e["id"]))
+                        counts["remote_to_local"] += 1
+                    # Keep the remote username authoritative for linked logins.
+                    if e["username"] != r["username"]:
+                        collision = c.execute("SELECT id FROM users WHERE username=? AND id<>?",(r["username"],e["account_id"])).fetchone()
+                        if collision:
+                            raise ValueError("ログインIDが衝突しています: " + r["username"])
+                        c.execute("UPDATE users SET username=? WHERE id=?",(r["username"],e["account_id"]))
+                    c.execute("UPDATE employees SET source_user_id=?,source_username=? WHERE id=?",(r["id"],r["username"],e["id"]))
+                # Import remote-only operators, without overwriting local accounts with matching IDs.
+                for r in remote.values():
+                    if r["id"] in linked_remote_ids:
+                        continue
+                    if c.execute("SELECT 1 FROM employees WHERE source_user_id=?",(r["id"],)).fetchone():
+                        counts["skipped"] += 1
+                        continue
+                    if c.execute("SELECT 1 FROM users WHERE username=?",(r["username"],)).fetchone():
+                        counts["skipped"] += 1
+                        continue
+                    cur=c.execute("INSERT INTO employees(name,active,skills,source_user_id,source_username) VALUES(?,?,?,?,?)",
+                                  (r["display_name"],r["active"],_sync_skills_from_callcenter(r["skills"]),r["id"],r["username"]))
+                    c.execute("INSERT INTO users(username,password_hash,role,employee_id) VALUES(?,?,'operator',?)",
+                              (r["username"],generate_password_hash(secrets.token_urlsafe(32)),cur.lastrowid))
+                    counts["remote_to_local"] += 1
+                # Export local-only operators. Passwords are deliberately NOT copied between systems.
+                for e in local:
+                    if e["source_user_id"] is not None or not e["username"]:
+                        continue
+                    if e["username"] in remote_by_name:
+                        continue
+                    if c.execute("SELECT 1 FROM employees WHERE id=? AND source_user_id IS NOT NULL",(e["id"],)).fetchone():
+                        continue
+                    salt=secrets.token_hex(16)
+                    temp=secrets.token_urlsafe(18)
+                    digest=hashlib.pbkdf2_hmac("sha256",temp.encode(),bytes.fromhex(salt),240000).hex()
+                    cur=c.execute("""INSERT INTO callcenter.users(username,display_name,role,salt,password_hash,active,skills)
+                         VALUES(?,?,'operator',?,?,?,?)""",(e["username"],e["name"],salt,digest,e["active"],_sync_skills_to_callcenter(e["skills"])))
+                    c.execute("UPDATE employees SET source_user_id=?,source_username=? WHERE id=?",(cur.lastrowid,e["username"],e["id"]))
+                    counts["local_to_remote"] += 1
+                # Commit through the same connection; passwords remain independently managed.
+            flash("双方向同期が完了しました。休憩→シフト: {remote_to_local}件、シフト→休憩: {local_to_remote}件、差異: {conflicts}件、保留: {skipped}件。休憩アプリに新規作成されたアカウントは休憩アプリ側でパスワード再設定が必要です。".format(**counts))
+        except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError) as exc:
+            flash("同期に失敗しました（変更はロールバックされます）: " + str(exc), "error")
+        return redirect(url_for("integration_page"))
+    if os.path.isfile(path):
+        try:
+            con=sqlite3.connect(f"file:{path.replace(os.sep, '/')}?mode=ro",uri=True,timeout=5)
+            preview_count=con.execute("SELECT COUNT(*) FROM users WHERE role='operator'").fetchone()[0]
+            con.close()
         except sqlite3.Error:
             pass
-    return render_template("integration.html", db_path=path, preview_count=preview_count, credentials=credentials, realtime_status=realtime_status)
+    return render_template("integration.html",db_path=path,preview_count=preview_count)
+
 
 @app.route("/requests", methods=["GET","POST"])
 @login_required
@@ -814,87 +918,113 @@ def import_page():
     return render_template("import.html", preview=preview, employees=employees, errors=errors,
                            headers=session.get("import_headers", []))
 
+def optimize_month(month):
+    """CP-SAT optimization; retain finalized rows, solve only drafts, never silently fall back."""
+    from ortools.sat.python import cp_model
+    days = month_days(month)
+    with db() as c:
+        employees = [dict(r) for r in c.execute("SELECT * FROM employees WHERE active=1 ORDER BY id")]
+        patterns = [dict(r) for r in c.execute("SELECT * FROM shift_patterns WHERE active=1")]
+        reqs = [dict(r) for r in c.execute("SELECT * FROM requests WHERE substr(request_date,1,7)=?",(month,))]
+        rules = [dict(r) for r in c.execute("SELECT * FROM coverage")]
+        locked = [dict(r) for r in c.execute("""SELECT a.*,p.start_time,p.end_time FROM assignments a
+                 JOIN shift_patterns p ON p.id=a.pattern_id WHERE substr(a.work_date,1,7)=? AND a.status='finalized'""",(month,))]
+    emp_by_id = {e['id']:e for e in employees}
+    locked_by_day = {(a['employee_id'],a['work_date']):a for a in locked}
+    approved = {(r['employee_id'],r['request_date']) for r in reqs if r['status']=='approved' and r['request_type'] in ('有給休暇','確定休')}
+    if any((a['employee_id'],a['work_date']) in approved for a in locked):
+        raise ValueError('確定済みシフトと承認済み休暇が重複しています。先に修正してください。')
+    if not employees or not patterns:
+        raise ValueError('有効な従業員と勤務パターンを登録してください。')
+    model = cp_model.CpModel()
+    choices = {}  # (employee id, ISO day, pattern id, assigned skill) -> boolean
+    per_emp_day = {}
+    day_skill = {}
+    penalties = []
+    for e in employees:
+        skills = [x.strip() for x in (e['skills'] or '').split(',') if x.strip() in ('consumer','merchant','PP')]
+        for d in days:
+            ds=d.isoformat(); key=(e['id'],ds)
+            if key in locked_by_day: continue
+            if key in approved: continue
+            opts=[]
+            for pat in patterns:
+                if pat['name'].startswith('早') and not e['early_ok']:continue
+                if pat['name'].startswith('中') and not e['mid_ok']:continue
+                if pat['name'].startswith('遅') and not e['late_ok']:continue
+                duration=(mins(pat['end_time'])-mins(pat['start_time'])-int(pat['break_minutes'] or 0))/60
+                if duration < float(e['min_hours'] if e['min_hours'] is not None else 0) or duration > float(e['max_hours'] if e['max_hours'] is not None else 24):continue
+                for skill in skills:
+                    var=model.NewBoolVar(f"x_{e['id']}_{ds}_{pat['id']}_{skill}")
+                    choices[e['id'],ds,pat['id'],skill]=var
+                    opts.append(var)
+                    day_skill.setdefault((ds,skill),[]).append((var,pat))
+                    for r in reqs:
+                        if r['employee_id']==e['id'] and r['request_date']==ds:
+                            if r['request_type'] in ('通常の休み希望','有給休暇','確定休'): penalties.append(40*var)
+                            elif r['request_type']=='できれば休み': penalties.append(12*var)
+            per_emp_day[key]=opts
+            model.Add(sum(opts)<=1)
+    for e in employees:
+        eid=e['id']
+        all_days=[]
+        for d in days:
+            ds=d.isoformat(); fixed=int((eid,ds) in locked_by_day)
+            all_days.append(fixed if fixed else sum(per_emp_day.get((eid,ds),[])))
+        target=max(0,int(e['monthly_days'] if e['monthly_days'] is not None else 20))
+        fixed_count=sum((eid,d.isoformat()) in locked_by_day for d in days)
+        if fixed_count > target: target=fixed_count
+        model.Add(sum(all_days)<=target)
+        under=model.NewIntVar(0,len(days),f'under_{eid}')
+        model.Add(under>=target-sum(all_days))
+        penalties.append(6*under)
+        consecutive=max(1,int(e['max_consecutive'] or 5))
+        for i in range(len(days)-consecutive):
+            model.Add(sum(all_days[i:i+consecutive+1])<=consecutive)
+    # Every requirement interval must be covered by a shift across the entire interval.
+    # Existing validator only checks overlap, so use the stronger full-interval criterion here.
+    for d in days:
+        ds=d.isoformat()
+        for r in rules:
+            if r['weekday']!=d.weekday():continue
+            need=int(r['min_count'])
+            if need<=0:continue
+            fixed=sum(1 for a in locked if a['work_date']==ds and a['skill']==r['skill'] and
+                      mins(a['start_time'])<=mins(r['start_time']) and mins(a['end_time'])>=mins(r['end_time']))
+            eligible=[v for v,p in day_skill.get((ds,r['skill']),[]) if
+                      mins(p['start_time'])<=mins(r['start_time']) and mins(p['end_time'])>=mins(r['end_time'])]
+            short=model.NewIntVar(0,need,f"short_{ds}_{r['id']}")
+            model.Add(sum(eligible)+fixed+short>=need)
+            penalties.append(1000*short)
+    # Mild penalty on extra shifts; helps avoid overscheduling when staffing is satisfied.
+    penalties.extend(choices.values())
+    model.Minimize(sum(penalties))
+    solver=cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds=25.0
+    solver.parameters.num_search_workers=4
+    result=solver.Solve(model)
+    if result not in (cp_model.OPTIMAL,cp_model.FEASIBLE):
+        raise ValueError('制約を満たすシフトを作成できませんでした。確定済み勤務や連勤条件を確認してください。')
+    selected=[(eid,ds,pid,skill) for (eid,ds,pid,skill),v in choices.items() if solver.Value(v)]
+    with db() as c:
+        # Transactional replacement: failed solve never erases previous drafts.
+        c.execute("DELETE FROM assignments WHERE substr(work_date,1,7)=? AND status='draft'",(month,))
+        c.executemany("INSERT INTO assignments(employee_id,work_date,pattern_id,skill,status) VALUES(?,?,?,?, 'draft')",selected)
+    return len(selected),result==cp_model.OPTIMAL
+
 @app.route("/generate", methods=["POST"])
 @login_required
 @admin_required
 def generate():
-    month = request.form.get("month") or date.today().strftime("%Y-%m")
-    days = month_days(month)
-    with db() as c:
-        employees = c.execute("SELECT * FROM employees WHERE active=1 ORDER BY monthly_days DESC,name").fetchall()
-        patterns = c.execute("SELECT * FROM shift_patterns WHERE active=1 ORDER BY start_time").fetchall()
-        reqs = c.execute("SELECT * FROM requests WHERE substr(request_date,1,7)=?", (month,)).fetchall()
-        existing = c.execute("SELECT * FROM assignments WHERE substr(work_date,1,7)=?", (month,)).fetchall()
-        # Replace only draft schedule for selected month.
-        c.execute("DELETE FROM assignments WHERE substr(work_date,1,7)=? AND status='draft'", (month,))
-        approved = {(r["employee_id"],r["request_date"]):r for r in reqs
-                    if r["request_type"] in ("有給休暇","確定休") and r["status"] == "approved"}
-        requests_by_emp = {}
-        for r in reqs:
-            requests_by_emp.setdefault(r["employee_id"], []).append(r)
-        counts = {e["id"]:0 for e in employees}
-        last_dates = {e["id"]:[] for e in employees}
-        # Greedy baseline generator. It prioritizes approved time-off and monthly target.
-        for d in days:
-            weekday = d.weekday()
-            candidates = []
-            for e in employees:
-                if (e["id"], d.isoformat()) in approved:
-                    continue
-                rlist = requests_by_emp.get(e["id"], [])
-                if any(r["request_date"] == d.isoformat() and r["request_type"] in ("有給休暇","確定休") and r["status"] == "approved" for r in rlist):
-                    continue
-                # Avoid days explicitly marked ordinary/desired where possible.
-                penalty = 0
-                for r in rlist:
-                    if r["request_date"] == d.isoformat():
-                        if r["request_type"] in ("有給休暇","確定休") and r["status"] != "approved":
-                            penalty += 100
-                        elif r["request_type"] == "通常の休み希望": penalty += 50
-                        elif r["request_type"] == "できれば休み": penalty += 15
-                        elif r["request_type"] == "申請中": penalty += 30
-                consecutive = 0
-                for x in reversed(last_dates[e["id"]]):
-                    if x == d - timedelta(days=consecutive+1): consecutive += 1
-                    else: break
-                if consecutive >= int(e["max_consecutive"] or 5):
-                    continue
-                if counts[e["id"]] >= int(e["monthly_days"] or 20):
-                    continue
-                eligible = []
-                for p in patterns:
-                    if p["name"].startswith("早") and not e["early_ok"]: continue
-                    if p["name"].startswith("中") and not e["mid_ok"]: continue
-                    if p["name"].startswith("遅") and not e["late_ok"]: continue
-                    duration = (mins(p["end_time"])-mins(p["start_time"])-int(p["break_minutes"] or 0))/60
-                    if duration < float(e["min_hours"] or 0) or duration > float(e["max_hours"] or 24): continue
-                    eligible.append(p)
-                if eligible:
-                    candidates.append((penalty + counts[e["id"]]*3 + consecutive*5, e, eligible))
-            # Aim for coverage on all 3 skills; this first prototype uses one primary skill per shift.
-            daily_assigned = []
-            rules = c.execute("SELECT * FROM coverage WHERE weekday=?", (weekday,)).fetchall()
-            # Work out per-skill rough target based on overlap, assigning under-covered skill first.
-            target = {s: max([r["min_count"] for r in rules if r["skill"] == s] or [1]) for s in ("merchant","consumer","PP")}
-            skill_counts = {s:0 for s in target}
-            candidates.sort(key=lambda x: x[0])
-            for _, e, eligible in candidates:
-                if len(daily_assigned) >= max(1, len(employees)-2):
-                    break
-                skills = [s for s in (e["skills"] or "").split(",") if s]
-                if not skills: continue
-                skill = min(skills, key=lambda s: skill_counts.get(s,0)/max(target.get(s,1),1))
-                p = eligible[0]
-                # Avoid giving everyone a shift every day: cap around requested monthly workdays.
-                c.execute("INSERT OR IGNORE INTO assignments(employee_id,work_date,pattern_id,skill,status) VALUES(?,?,?,?,?)",
-                          (e["id"], d.isoformat(), p["id"], skill, "draft"))
-                if c.total_changes:
-                    counts[e["id"]] += 1
-                    last_dates[e["id"]].append(d)
-                    skill_counts[skill] = skill_counts.get(skill,0)+1
-                    daily_assigned.append(e["id"])
-        flash(f"{month}の仮シフトを作成しました。自動作成は初期版の簡易方式です。必ず警告・必要人数を確認してください。")
-    return redirect(url_for("index", month=month))
+    month=request.form.get('month') or date.today().strftime('%Y-%m')
+    try:
+        count,optimal=optimize_month(month)
+        flash(f'{month} の仮シフトをOR-Toolsで{count}件作成しました。' + (' 最適解です。' if optimal else ' 制限時間内の暫定解です。') + ' 警告・必要人数を確認してください。')
+    except ImportError:
+        flash('OR-Toolsが組み込まれていません。requirements.txtからインストールし、EXE版は再ビルドしてください。','error')
+    except (ValueError,sqlite3.Error) as exc:
+        flash(f'シフトを作成できませんでした: {exc}','error')
+    return redirect(url_for('index',month=month))
 
 def validate_month(month):
     warnings = []
@@ -1100,7 +1230,6 @@ def password_page():
 
 if __name__ == "__main__":
     init_db()
-    realtime_sync.start_worker(DB_PATH, _callcenter_db_path, lambda: bool(os.environ.get("OPERATOR_REALTIME_SYNC", "1") == "1"))
     # Bind only to LAN interfaces when explicitly configured; default local-only for safe first run.
     host = os.environ.get("SHIFT_HOST", "0.0.0.0")
     port = int(os.environ.get("SHIFT_PORT", "5050"))

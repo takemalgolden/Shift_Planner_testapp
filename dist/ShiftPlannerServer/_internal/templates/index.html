@@ -19,7 +19,7 @@
 </div>{% endfor %}
 </div>{% endfor %}
 </div></div>
-<p class="muted small">自動作成は初期版の簡易ロジックです。必ず「警告・確定」で必要人数と休み希望を確認してください。</p>
+<p class="muted small">自動作成にはOR-Tools CP-SATを使用します。必ず「警告・確定」で必要人数と休み希望を確認してください。</p>
 
 {% if session.get("role") == "admin" %}
 <style>

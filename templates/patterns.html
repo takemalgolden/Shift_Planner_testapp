@@ -7,8 +7,8 @@
     <input type="hidden" name="action" value="add">
     <div class="grid">
       <label class="field">名称<input name="name" required placeholder="例: 短時間早番"></label>
-      <label class="field">開始<input type="time" name="start_time" value="09:20" required></label>
-      <label class="field">終了<input type="time" name="end_time" value="18:00" required></label>
+      <label class="field">開始<select name="start_time" required>{% for time in time_options %}<option value="{{ time }}" {% if time == "09:20" %}selected{% endif %}>{{ time }}</option>{% endfor %}</select></label>
+      <label class="field">終了<select name="end_time" required>{% for time in time_options %}<option value="{{ time }}" {% if time == "18:00" %}selected{% endif %}>{{ time }}</option>{% endfor %}</select></label>
       <label class="field">休憩（分）<input type="number" name="break_minutes" min="0" max="240" value="60" required></label>
     </div>
     <button>追加</button>
@@ -26,8 +26,8 @@
           <input type="hidden" name="action" value="update">
           <input type="hidden" name="pattern_id" value="{{ p.id }}">
           <label class="field">名称<input name="name" value="{{ p.name }}" required></label>
-          <label class="field">開始<input type="time" name="start_time" value="{{ p.start_time }}" required></label>
-          <label class="field">終了<input type="time" name="end_time" value="{{ p.end_time }}" required></label>
+          <label class="field">開始<select name="start_time" required>{% for time in time_options %}<option value="{{ time }}" {% if time == p.start_time %}selected{% endif %}>{{ time }}</option>{% endfor %}</select></label>
+          <label class="field">終了<select name="end_time" required>{% for time in time_options %}<option value="{{ time }}" {% if time == p.end_time %}selected{% endif %}>{{ time }}</option>{% endfor %}</select></label>
           <label class="field">休憩（分）<input type="number" name="break_minutes" min="0" max="240" value="{{ p.break_minutes }}" required></label>
           <label class="field">状態<select name="active"><option value="1" {% if p.active %}selected{% endif %}>有効</option><option value="0" {% if not p.active %}selected{% endif %}>無効</option></select></label>
           <div><button>変更を保存</button></div>

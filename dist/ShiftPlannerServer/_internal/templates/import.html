@@ -1,4 +1,19 @@
-{% extends "base.html" %}{% block content %}<h1>休暇・休み希望 CSV取込</h1>
+{% extends "base.html" %}{% block content %}<h1>休暇・休み希望 データ取込・出力</h1>
+<div class="card"><h2>確定済みシフトの出力</h2>
+<p>管理者が確定したシフトのみ出力します。仮シフトや休暇申請データは含まれません。</p>
+<form method="get" action="{{ url_for('export_csv') }}">
+<label class="field">対象月<input type="month" name="month" value="{{ request.args.get('month', '') }}" required></label>
+<button type="submit" name="format" value="xlsx">確定シフトをExcelで出力</button>
+<button type="submit" name="format" value="csv">確定シフトをCSVで出力</button>
+</form></div>
+<div class="card"><h2>休暇・休み希望のデータ出力</h2>
+<p>登録済みの希望休・休暇申請を、Excelで開けるCSV形式でダウンロードできます。対象月・申請状態で絞り込めます。従業員の提出分と管理者登録分の両方が対象です。</p>
+<form method="get" action="{{ url_for('export_requests_csv') }}">
+<div class="grid">
+<label class="field">対象月（空欄なら全期間）<input type="month" name="month"></label>
+<label class="field">申請状態<select name="status"><option value="all">すべて</option><option value="pending">申請中</option><option value="approved">承認済み</option><option value="rejected">却下</option></select></label>
+</div><button type="submit">CSVをダウンロード（Excel対応）</button></form>
+<p class="small muted">CSVはUTF-8（BOM付き）で出力します。Excelで開いて「名前を付けて保存」から .xlsx 形式にもできます。出力ファイルには従業員情報が含まれるため取り扱いに注意してください。</p></div>
 <div class="card"><p>Excelから「CSV UTF-8」で保存して取り込んでください。最初にCSVを読み込んで列を確認し、次に従業員名・日付・区分の列を対応付けます。</p>
 <form method="post" enctype="multipart/form-data"><label class="field">CSVファイル<input type="file" name="file" accept=".csv,text/csv" required></label><button>読み込み・プレビュー</button></form>
 {% if preview %}<h2>プレビュー（{{ preview.count }}件中 最大20件）</h2><table><tr>{% for h in preview.headers %}<th>{{ h }}</th>{% endfor %}</tr>{% for row in preview.rows %}<tr>{% for h in preview.headers %}<td>{{ row.get(h,"") }}</td>{% endfor %}</tr>{% endfor %}</table>{% endif %}

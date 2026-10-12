@@ -70,7 +70,7 @@
  [],
  False,
  False,
- 1791774998,
+ 1791776351,
  [('run.exe',
    'C:\\Users\\takemaru\\Downloads\\シフト作成アプリver1.1\\shift_planner_app\\.build_python\\Lib\\site-packages\\PyInstaller\\bootloader\\Windows-64bit-intel\\run.exe',
    'EXECUTABLE')],

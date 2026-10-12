@@ -4,7 +4,7 @@
 <form method="get" class="card"><label>対象月 <input type="month" name="month" value="{{ month }}"></label> <button>表示</button>
 {% if session.get("role") == "admin" %}<button type="button" onclick="document.getElementById('generate').submit()">自動作成</button>
 <button type="button" onclick="openShiftModal('warnings')">警告・確定{% if warnings %}（{{ warnings|length }}件）{% endif %}</button>
-<a class="btn" href="{{ url_for('export_csv',month=month) }}">CSV出力</a>{% endif %}</form>
+<a class="btn" href="{{ url_for('export_csv',month=month,format='xlsx') }}">確定シフト Excel出力</a> <a class="btn" href="{{ url_for('export_csv',month=month,format='csv') }}">確定シフト CSV出力</a>{% endif %}</form>
 {% if session.get("role") == "admin" %}<form id="generate" method="post" action="{{ url_for('generate') }}"><input type="hidden" name="month" value="{{ month }}"></form>{% endif %}
 <div class="card"><div class="calendar">
 {% for w in ["月","火","水","木","金","土","日"] %}<div class="dayhead">{{ w }}</div>{% endfor %}

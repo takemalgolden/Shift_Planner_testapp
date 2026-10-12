@@ -20,7 +20,7 @@ table{border-collapse:collapse;width:100%;background:white}th,td{border:1px soli
 <nav><a href="{{ url_for('index') }}">月間カレンダー</a>
 {% if session.get("role") == "admin" %}<a href="{{ url_for('requests_page') }}">希望休管理</a><a href="{{ url_for('integration_page') }}">従業員データ連携</a><a href="{{ url_for('employees_page') }}">従業員</a>
 {% else %}<a href="{{ url_for('my_requests_page') }}">希望休を提出</a>{% endif %}
-{% if session.get("role") == "admin" %}<a href="{{ url_for('patterns_page') }}">勤務パターン</a><a href="{{ url_for('coverage_page') }}">必要人数</a><a href="{{ url_for('import_page') }}">CSV取込</a><a href="{{ url_for('index',modal='warnings') }}">警告・確定</a>{% endif %}
+{% if session.get("role") == "admin" %}<a href="{{ url_for('patterns_page') }}">勤務パターン</a><a href="{{ url_for('coverage_page') }}">必要人数</a><a href="{{ url_for('import_page') }}">休暇データ取込・出力</a><a href="{{ url_for('index',modal='warnings') }}">警告・確定</a>{% endif %}
 <a href="{{ url_for('password_page') }}">パスワード変更</a><a href="{{ url_for('logout') }}">ログアウト</a></nav></header>
 <main>
 {% with messages = get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}{% endwith %}

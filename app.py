@@ -1,5 +1,6 @@
 from flask import Flask, request, redirect, url_for, render_template, flash, session, send_file
 import sqlite3
+import realtime_sync
 import re, os, csv, io, json, calendar, hashlib, hmac, secrets
 from datetime import date, datetime, timedelta
 from functools import wraps
@@ -513,76 +514,135 @@ def coverage_page():
         rows = c.execute("SELECT * FROM coverage ORDER BY weekday,start_time,skill").fetchall()
     return render_template("coverage.html", rows=rows, weekdays=["月","火","水","木","金","土","日"])
 
+def sync_operator_records(path, direction):
+    """Synchronize operator profiles in one selected direction, never overwrite passwords.
+
+    The source of truth is selected explicitly on every run. Existing usernames
+    are matched only when not already linked to a different employee.
+    """
+    if direction not in ("break_to_shift", "shift_to_break"):
+        raise ValueError("同期方向が正しくありません。")
+    if os.path.realpath(path) == os.path.realpath(DB_PATH):
+        raise ValueError("異なるデータベースを指定してください。")
+    # Attach the other DB so both profile tables are modified in one connection.
+    # Existing SQLite WAL databases are supported; password changes are excluded.
+    with db() as c:
+        c.execute("ATTACH DATABASE ? AS breakdb", (path,))
+        try:
+            cols = {r[1] for r in c.execute("PRAGMA breakdb.table_info(users)")}
+            required = {"id", "username", "display_name", "role", "active", "skills", "shift_start", "shift_end", "salt", "password_hash"}
+            if not required.issubset(cols):
+                raise ValueError("休憩管理アプリのDB形式が一致しません。")
+            c.execute("SELECT 1 FROM breakdb.users LIMIT 1")
+            stats = {"created": 0, "updated": 0, "skipped": 0, "credentials": []}
+            if direction == "break_to_shift":
+                source = c.execute("SELECT * FROM breakdb.users WHERE role='operator' ORDER BY id").fetchall()
+                for su in source:
+                    username = su["username"]
+                    matched = c.execute("SELECT * FROM employees WHERE source_user_id=?", (su["id"],)).fetchone()
+                    account = c.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+                    if account and account["role"] != "operator":
+                        raise ValueError(f"管理者IDとの衝突: {username}")
+                    if account and matched and account["employee_id"] not in (None, matched["id"]):
+                        raise ValueError(f"IDの紐付けが競合: {username}")
+                    if account and not matched and account["employee_id"]:
+                        matched = c.execute("SELECT * FROM employees WHERE id=?", (account["employee_id"],)).fetchone()
+                        if matched and matched["source_user_id"] not in (None, su["id"]):
+                            raise ValueError(f"別のアカウントに紐付け済み: {username}")
+                    skills = json.loads(su["skills"] or "[]")
+                    mapped = [x for x in (dict(Consumer="consumer", Merchant="merchant", PP="PP").get(sk) for sk in skills) if x]
+                    mapped = list(dict.fromkeys(mapped)) or ["consumer"]
+                    if matched:
+                        eid = matched["id"]
+                        c.execute("UPDATE employees SET name=?,active=?,skills=?,source_user_id=?,source_username=? WHERE id=?",
+                                  (su["display_name"], su["active"], ",".join(mapped), su["id"], username, eid))
+                        stats["updated"] += 1
+                    else:
+                        cur = c.execute("INSERT INTO employees(name,active,skills,source_user_id,source_username) VALUES(?,?,?,?,?)",
+                                        (su["display_name"], su["active"], ",".join(mapped), su["id"], username))
+                        eid = cur.lastrowid
+                        stats["created"] += 1
+                    if account:
+                        c.execute("UPDATE users SET employee_id=? WHERE id=?", (eid, account["id"]))
+                    else:
+                        c.execute("INSERT INTO users(username,password_hash,role,employee_id) VALUES(?,?, 'operator', ?)",
+                                  (username, generate_password_hash(secrets.token_urlsafe(20)), eid))
+            else:
+                source = c.execute("""SELECT e.*, u.username AS login_username FROM employees e
+                    JOIN users u ON u.employee_id=e.id AND u.role='operator' ORDER BY e.id""").fetchall()
+                for emp in source:
+                    username = emp["login_username"]
+                    by_link = (c.execute("SELECT * FROM breakdb.users WHERE id=? AND role='operator'", (emp["source_user_id"],)).fetchone()
+                               if emp["source_user_id"] is not None else None)
+                    by_name = c.execute("SELECT * FROM breakdb.users WHERE username=?", (username,)).fetchone()
+                    if by_name and by_name["role"] != "operator":
+                        raise ValueError(f"休憩アプリ管理者IDとの衝突: {username}")
+                    if by_link and by_name and by_link["id"] != by_name["id"]:
+                        raise ValueError(f"リンク先とログインIDが競合: {username}")
+                    target = by_link or by_name
+                    skills = [dict(consumer="Consumer", merchant="Merchant", PP="PP").get(sk.strip())
+                              for sk in (emp["skills"] or "").split(",")]
+                    skills = list(dict.fromkeys(x for x in skills if x)) or ["Consumer"]
+                    if target:
+                        c.execute("""UPDATE breakdb.users SET username=?,display_name=?,active=?,skills=? WHERE id=?""",
+                                  (username, emp["name"], emp["active"], json.dumps(skills), target["id"]))
+                        uid = target["id"]
+                        stats["updated"] += 1
+                    else:
+                        # New accounts receive a random temporary password. No existing password is overwritten.
+                        password = "T" + secrets.token_urlsafe(9)[:11] + "7!"
+                        salt = secrets.token_hex(16)
+                        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 240000).hex()
+                        cur = c.execute("""INSERT INTO breakdb.users
+                          (username,display_name,role,salt,password_hash,active,skills,shift_start,shift_end)
+                          VALUES(?,?,'operator',?,?,?,?,?,?)""",
+                          (username,emp["name"],salt,digest,emp["active"],json.dumps(skills),"09:00","18:00"))
+                        uid = cur.lastrowid
+                        stats["credentials"].append((username, password))
+                        stats["created"] += 1
+                    c.execute("UPDATE employees SET source_user_id=?,source_username=? WHERE id=?", (uid, username, emp["id"]))
+            c.execute("INSERT INTO settings(key,value) VALUES('callcenter_db_path',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (path,))
+            return stats
+        finally:
+            # ATTACH is closed when the context-managed connection is garbage-collected.
+            pass
+
+
 @app.route("/integration", methods=["GET", "POST"])
 @login_required
 @admin_required
 def integration_page():
     path = _callcenter_db_path()
+    credentials = []
     if request.method == "POST":
-        path = os.path.abspath(request.form.get("db_path", "").strip())
-        if not path or not os.path.isfile(path):
-            flash("休憩時間配置アプリのSQLiteファイルが見つかりません。パスを確認してください。", "error")
-            return render_template("integration.html", db_path=path, preview_count=None)
-        try:
-            src = sqlite3.connect(f"file:{path.replace(os.sep, '/')}?mode=ro", uri=True, timeout=5)
-            src.row_factory = sqlite3.Row
-            cols = {r[1] for r in src.execute("PRAGMA table_info(users)").fetchall()}
-            if not {"id","username","display_name","role","active","skills"}.issubset(cols):
-                src.close()
-                raise ValueError("usersテーブルの構造が想定と異なります。")
-            source_users = src.execute("SELECT id,username,display_name,role,active,skills,shift_start,shift_end FROM users WHERE role='operator' ORDER BY id").fetchall()
-            src.close()
-            if request.form.get("action") == "save_path":
-                with db() as c:
-                    c.execute("INSERT INTO settings(key,value) VALUES('callcenter_db_path',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (path,))
-                flash("データベースの参照先を保存しました。")
-            else:
-                synced = 0
-                with db() as c:
-                    c.execute("INSERT INTO settings(key,value) VALUES('callcenter_db_path',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (path,))
-                    for su in source_users:
-                        # Use only active operator accounts; map skill labels to shift-planner labels.
-                        skill_list = json.loads(su["skills"] or "[]")
-                        mapped = []
-                        for skill in skill_list:
-                            mapped_skill = {"Consumer":"consumer","Merchant":"merchant","PP":"PP",
-                                            "consumer":"consumer","merchant":"merchant"}.get(skill, skill)
-                            if mapped_skill in ("consumer","merchant","PP") and mapped_skill not in mapped:
-                                mapped.append(mapped_skill)
-                        if not mapped:
-                            mapped = ["consumer"]
-                        emp = c.execute("SELECT id FROM employees WHERE source_user_id=?", (su["id"],)).fetchone()
-                        if emp:
-                            eid = emp["id"]
-                            c.execute("""UPDATE employees SET name=?,active=?,skills=?,source_username=?
-                                         WHERE id=?""",
-                                      (su["display_name"], int(su["active"]), ",".join(mapped), su["username"], eid))
-                        else:
-                            c.execute("""INSERT INTO employees(name,active,skills,source_user_id,source_username)
-                                         VALUES(?,?,?,?,?)""",
-                                      (su["display_name"], int(su["active"]), ",".join(mapped), su["id"], su["username"]))
-                            eid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
-                        # Local placeholder hash is never used for linked accounts; login checks source DB.
-                        placeholder = generate_password_hash(secrets.token_urlsafe(32))
-                        c.execute("""INSERT INTO users(username,password_hash,role,employee_id)
-                                     VALUES(?,?, 'operator', ?)
-                                     ON CONFLICT(username) DO UPDATE SET role='operator', employee_id=excluded.employee_id""",
-                                  (su["username"], placeholder, eid))
-                        synced += 1
-                flash(f"従業員データを同期しました（対象オペレーター {synced}名）。希望休提出時は休憩時間配置アプリと同じID・パスワードを使用できます。")
-            return redirect(url_for("integration_page"))
-        except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError) as exc:
-            flash(f"連携に失敗しました: {exc}", "error")
+        raw_path = request.form.get("db_path", "").strip()
+        path = os.path.abspath(os.path.expandvars(raw_path)) if raw_path else ""
+        if not os.path.isfile(path):
+            flash("休憩管理アプリのSQLiteファイルが見つかりません。", "error")
+        else:
+            try:
+                action = request.form.get("action")
+                if action == "save_path":
+                    with db() as c:
+                        c.execute("INSERT INTO settings(key,value) VALUES('callcenter_db_path',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (path,))
+                    flash("接続先を保存しました。")
+                elif action in ("break_to_shift", "shift_to_break"):
+                    result = sync_operator_records(path, action)
+                    credentials = result["credentials"]
+                    flash(f"同期完了：新規 {result['created']}名・更新 {result['updated']}名。既存のパスワードは変更していません。")
+                else:
+                    flash("同期方向を選択してください。", "error")
+            except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError) as exc:
+                flash(f"同期に失敗しました: {exc}", "error")
     preview_count = None
-    if os.path.isfile(path):
+    realtime_status = realtime_sync.status()
+    if path and os.path.isfile(path):
         try:
-            src = sqlite3.connect(f"file:{path.replace(os.sep, '/')}?mode=ro", uri=True, timeout=5)
-            preview_count = src.execute("SELECT COUNT(*) FROM users WHERE role='operator' AND active=1").fetchone()[0]
-            src.close()
+            with sqlite3.connect(path) as src:
+                preview_count = src.execute("SELECT COUNT(*) FROM users WHERE role='operator'").fetchone()[0]
         except sqlite3.Error:
             pass
-    return render_template("integration.html", db_path=path, preview_count=preview_count)
-
+    return render_template("integration.html", db_path=path, preview_count=preview_count, credentials=credentials, realtime_status=realtime_status)
 
 @app.route("/requests", methods=["GET","POST"])
 @login_required
@@ -640,6 +700,58 @@ def my_requests_page():
                             ORDER BY request_date DESC LIMIT 200""", (employee_id,)).fetchall()
         emp = c.execute("SELECT name FROM employees WHERE id=?", (employee_id,)).fetchone()
     return render_template("my_requests.html", rows=rows, employee_name=emp["name"] if emp else session["username"])
+
+
+@app.route("/requests/export", methods=["GET"])
+@login_required
+@admin_required
+def export_requests_csv():
+    """Export requests to an Excel-friendly UTF-8 BOM CSV, with optional month/status filters."""
+    month = request.args.get("month", "").strip()
+    status = request.args.get("status", "all").strip()
+    if month:
+        try:
+            datetime.strptime(month, "%Y-%m")
+            if len(month) != 7:
+                raise ValueError()
+        except ValueError:
+            flash("対象月の形式を確認してください。", "error")
+            return redirect(url_for("import_page"))
+    if status not in ("all", "pending", "approved", "rejected"):
+        flash("申請状態が不正です。", "error")
+        return redirect(url_for("import_page"))
+    sql = """SELECT r.request_date, e.name, r.request_type, r.status, r.note,
+                    u.username AS login_id
+             FROM requests r
+             JOIN employees e ON e.id = r.employee_id
+             LEFT JOIN users u ON u.employee_id = e.id AND u.role = 'operator'
+             WHERE 1=1"""
+    params = []
+    if month:
+        sql += " AND substr(r.request_date,1,7)=?"
+        params.append(month)
+    if status != "all":
+        sql += " AND r.status=?"
+        params.append(status)
+    sql += " ORDER BY r.request_date,e.name,r.id"
+    with db() as c:
+        records = c.execute(sql, params).fetchall()
+    buf = io.StringIO(newline="")
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(["従業員名", "日付", "休暇区分", "状態", "備考", "ログインID"])
+    def safe_cell(value):
+        value = "" if value is None else str(value)
+        # Prevent spreadsheet formula injection in user-entered cells.
+        if value.lstrip().startswith(("=", "+", "-", "@")) or value.startswith(("\t", "\r", "\n")):
+            return "'" + value
+        return value
+    for r in records:
+        writer.writerow([safe_cell(r["name"]), r["request_date"], safe_cell(r["request_type"]),
+                         r["status"], safe_cell(r["note"]), safe_cell(r["login_id"])])
+    data = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
+    filename = f"leave_requests_{month or 'all'}.csv"
+    return send_file(data, mimetype="text/csv; charset=utf-8", as_attachment=True,
+                     download_name=filename)
 
 
 @app.route("/import", methods=["GET","POST"])
@@ -872,17 +984,60 @@ def finalize_page():
 @login_required
 @admin_required
 def export_csv():
+    """Export only finalized assignments for the selected month."""
     month = get_month()
+    file_format = request.args.get("format", "xlsx").lower()
+    if file_format not in ("xlsx", "csv"):
+        flash("出力形式を確認してください。", "error")
+        return redirect(url_for("index", month=month))
     with db() as c:
-        rows = c.execute("""SELECT a.work_date,e.name,p.name pattern_name,p.start_time,p.end_time,a.skill,a.status,a.note
-        FROM assignments a JOIN employees e ON e.id=a.employee_id JOIN shift_patterns p ON p.id=a.pattern_id
-        WHERE substr(a.work_date,1,7)=? ORDER BY a.work_date,p.start_time,e.name""",(month,)).fetchall()
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["日付","従業員","勤務パターン","開始","終了","担当スキル","状態","備考"])
-    for r in rows: writer.writerow(list(r))
-    data = io.BytesIO(("\ufeff"+output.getvalue()).encode("utf-8"))
-    return send_file(data, mimetype="text/csv; charset=utf-8", as_attachment=True, download_name=f"shift_{month}.csv")
+        rows = c.execute("""SELECT a.work_date, e.name, COALESCE(u.username, '') AS login_id,
+            p.name AS pattern_name, p.start_time, p.end_time, a.skill, a.note
+            FROM assignments a
+            JOIN employees e ON e.id=a.employee_id
+            JOIN shift_patterns p ON p.id=a.pattern_id
+            LEFT JOIN users u ON u.employee_id=e.id AND u.role='operator'
+            WHERE substr(a.work_date,1,7)=? AND a.status='finalized'
+            ORDER BY a.work_date,p.start_time,e.name,a.id""", (month,)).fetchall()
+    if not rows:
+        flash("対象月に確定済みシフトがありません。シフトを確定してから出力してください。", "error")
+        return redirect(url_for("index", month=month))
+    headers = ["勤務日", "従業員名", "ログインID", "勤務パターン", "開始時刻", "終了時刻", "担当スキル", "備考"]
+    values = [[r[k] or "" for k in ("work_date", "name", "login_id", "pattern_name", "start_time", "end_time", "skill", "note")] for r in rows]
+    if file_format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(headers)
+        writer.writerows(values)
+        data = io.BytesIO(("\ufeff" + output.getvalue()).encode("utf-8"))
+        return send_file(data, mimetype="text/csv; charset=utf-8", as_attachment=True,
+                         download_name=f"finalized_shifts_{month}.csv")
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "確定シフト"
+    ws.append(headers)
+    for row in values:
+        ws.append(row)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:H{len(values)+1}"
+    for cell in ws[1]:
+        cell.fill = PatternFill("solid", fgColor="17365D")
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    for i, width in enumerate((16, 20, 19, 19, 14, 14, 19, 36), 1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="center")
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return send_file(output, as_attachment=True,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                     download_name=f"finalized_shifts_{month}.xlsx")
 
 @app.route("/assignments/<int:assignment_id>/edit", methods=["GET","POST"])
 @login_required
@@ -945,6 +1100,7 @@ def password_page():
 
 if __name__ == "__main__":
     init_db()
+    realtime_sync.start_worker(DB_PATH, _callcenter_db_path, lambda: bool(os.environ.get("OPERATOR_REALTIME_SYNC", "1") == "1"))
     # Bind only to LAN interfaces when explicitly configured; default local-only for safe first run.
     host = os.environ.get("SHIFT_HOST", "0.0.0.0")
     port = int(os.environ.get("SHIFT_PORT", "5050"))
